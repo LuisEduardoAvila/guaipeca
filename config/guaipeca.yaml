@@ -1,0 +1,120 @@
+# Guaipeca - Lightweight Configurable RAG MCP Server
+# 
+# Place at: ~/.guaipeca/guaipeca.yaml or specify with --config
+
+corpora:
+  # Define your document corpora here
+  # Each corpus is a folder with its own weight and topic label
+  
+  - name: epm-docs
+    path: /path/to/your/docs
+    topic: "EPM & Oracle HFM/ARCS"
+    weight: 1.5
+    extensions: [.md, .txt, .pdf, .docx]
+  
+  - name: finance-reference
+    path: /path/to/your/finance-docs
+    topic: "Finance & Accounting Standards"
+    weight: 1.3
+    extensions: [.md, .txt, .pdf]
+  
+  - name: general-notes
+    path: /path/to/your/notes
+    topic: "General Notes & Decisions"
+    weight: 1.0
+    extensions: [.md, .txt]
+
+# Embedding configuration
+# FastEmbed (ONNX Runtime) — no torch dependency, CPU-only
+#
+# Supported models (use the model name as shown below):
+#
+#  ── Speed-optimized (384-dim, <100MB) ──────────────────────────
+#  all-MiniLM-L6-v2            384 dim   90MB    Fast, good quality (default)
+#  BAAI/bge-small-en-v1.5      384 dim   67MB    Fast, better quality than MiniLM
+#  snowflake/arctic-embed-xs   384 dim   90MB    Fast, good for general use
+#
+#  ── Balanced (512-768 dim, 120-520MB) ──────────────────────────
+#  jinaai/jina-embeddings-v2-small-en  512 dim  120MB  Long context (8192 tokens)
+#  BAAI/bge-base-en-v1.5              768 dim  210MB  Better quality, slower
+#  nomic-ai/nomic-embed-text-v1.5-Q   768 dim  130MB  Quantized, good balance
+#  snowflake/arctic-embed-s           384 dim  130MB  Good quality, compact
+#
+#  ── Quality-optimized (768-1024 dim, 420MB+) ──────────────────
+#  BAAI/bge-large-en-v1.5             1024 dim  1.2GB  Best quality, slowest
+#  mixedbread-ai/mxbai-embed-large-v1 1024 dim  640MB  High quality
+#  jinaai/jina-embeddings-v2-base-en  768 dim   520MB  Long context (8192)
+#
+#  ── Multilingual ───────────────────────────────────────────────
+#  paraphrase-multilingual-MiniLM-L12-v2  384 dim  220MB  ~50 languages
+#  paraphrase-multilingual-mpnet-base-v2  768 dim  1.0GB  ~50 languages, better
+#  intfloat/multilingual-e5-large         1024 dim  2.2GB  ~100 languages
+#
+#  ── Code ──────────────────────────────────────────────────────
+#  jinaai/jina-embeddings-v2-base-code    768 dim  640MB  Code + docs, 30+ langs
+#
+# ⚠️  Changing dimensions requires a full reindex (FAISS vectors must match).
+#     To switch: update model + dimensions, then run: guaipeca index --force
+#
+embedding:
+  model: all-MiniLM-L6-v2       # fastembed model name (see options above)
+  dimensions: 384                # embedding dimensions (must match model)
+  cache_dir: ~/.guaipeca/models  # where to cache downloaded models
+  preprocess: true               # prepend heading + first 500 chars before embedding (better semantic signal)
+  cache_ttl_seconds: 3600        # embedding cache entry time-to-live in seconds (default: 1 hour)
+  cache_max_entries: 10000       # max embedding cache entries; LRU eviction when full (default: 10000)
+
+# Chunking configuration
+chunking:
+  max_size: 2000                 # max chunk size in characters (~500 tokens)
+  overlap: 200                    # overlap between consecutive chunks (10% of max_size)
+  table_aware: true               # treat tables as atomic units
+  split_on_headings: true         # split on ## headings
+
+# Indexing configuration
+indexing:
+  data_dir: ~/.guaipeca/data     # where FAISS indexes + metadata are stored
+  incremental: true              # skip unchanged files (hash-based)
+  max_file_size: 52428800        # 50MB max per file
+  exclude_dirs:                  # directories to skip
+    - node_modules
+    - .git
+    - venv
+    - __pycache__
+    - .pytest_cache
+
+# MCP Server configuration
+server:
+  transport: both                # stdio | http | both
+  port: 8090                     # HTTP port (if http or both)
+  host: 127.0.0.1                # HTTP bind address (use 0.0.0.0 for network access)
+  # auth_token: <your-secret-token>  # Optional: set to require Bearer token auth on HTTP
+
+# Upload configuration (MCP file ingestion)
+# Controls which corpora accept uploaded files via the upload tool.
+upload:
+  allow: []                        # list of corpus names that accept uploads (e.g. ["epm-docs"])
+  max_file_size: 52428800          # max upload size in bytes (default: 50MB)
+  allowed_extensions:              # file extensions permitted for upload
+    - .md
+    - .txt
+    - .markdown
+    - .pdf
+    - .docx
+    - .doc
+    - .pptx
+    - .ppt
+    - .xlsx
+    - .xls
+    - .html
+    - .htm
+    - .csv
+  auto_index: true                 # index the corpus automatically after upload
+
+# Search configuration
+# Hybrid BM25 + FAISS search with Reciprocal Rank Fusion (RRF)
+search:
+  hybrid: false                    # Enable BM25 hybrid search (default: false for backward compat)
+  bm25_weight: 1.0                # BM25 contribution weight in RRF fusion
+  dense_weight: 1.0                # Dense (FAISS) contribution weight in RRF fusion
+  rrf_k: 60                        # RRF constant (standard value, higher = smoother ranking)

@@ -1,0 +1,27 @@
+# Guaipeca — Docker Compose for VM deployment
+# Usage:
+#   1. mkdir -p data/{config,corpora,index,models}
+#   2. cp config/guaipeca.container.yaml data/config/guaipeca.yaml
+#   3. Copy your documents to data/corpora/
+#   4. docker compose up -d
+
+services:
+  guaipeca:
+    image: ghcr.io/luis-eduardo-avila/guaipeca:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: guaipeca
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./data:/data
+    environment:
+      - GUAIPECA_CONFIG=/data/config/guaipeca.yaml
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3

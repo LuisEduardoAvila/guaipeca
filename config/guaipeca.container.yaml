@@ -1,0 +1,82 @@
+# Guaipeca — Container Configuration
+# 
+# Config with container-relative paths for Docker deployment.
+# Mount at: /data/config/guaipeca.yaml
+#
+# All paths use /data/ which is the mounted volume root.
+
+corpora:
+  # Define your document corpora here
+  # Source documents live in /data/corpora/<name>/
+
+  - name: epm-docs
+    path: /data/corpora/epm-docs
+    topic: "EPM & Oracle HFM/ARCS"
+    weight: 1.5
+    extensions: [.md, .txt, .pdf, .docx]
+
+  # Add more corpora as needed:
+  # - name: finance-reference
+  #   path: /data/corpora/finance-reference
+  #   topic: "Finance & Accounting Standards"
+  #   weight: 1.3
+  #   extensions: [.md, .txt, .pdf]
+
+# Embedding configuration
+embedding:
+  model: all-MiniLM-L6-v2       # sentence-transformers model name
+  dimensions: 384                # embedding dimensions (must match model)
+  cache_dir: /data/models        # model cache in the volume
+
+# Chunking configuration
+chunking:
+  max_size: 2000                 # max chunk size in characters (~500 tokens)
+  overlap: 200                   # overlap between consecutive chunks (10% of max_size)
+  table_aware: true              # treat tables as atomic units
+  split_on_headings: true        # split on ## headings
+
+# Indexing configuration
+indexing:
+  data_dir: /data/index          # FAISS indexes + metadata in the volume
+  incremental: true              # skip unchanged files (hash-based)
+  max_file_size: 52428800        # 50MB max per file
+  exclude_dirs:
+    - node_modules
+    - .git
+    - venv
+    - __pycache__
+    - .pytest_cache
+
+# MCP Server configuration
+server:
+  transport: http                # http only in container (no stdio needed)
+  port: 8090                     # MCP HTTP/SSE port
+  host: 0.0.0.0                  # bind to all interfaces for container access
+  # auth_token: "your-secret-token"  # Optional: set to require Bearer token auth
+
+# Upload configuration (MCP file ingestion)
+upload:
+  allow: []                        # list of corpus names that accept uploads
+  max_file_size: 52428800          # max upload size in bytes (default: 50MB)
+  allowed_extensions:
+    - .md
+    - .txt
+    - .markdown
+    - .pdf
+    - .docx
+    - .doc
+    - .pptx
+    - .ppt
+    - .xlsx
+    - .xls
+    - .html
+    - .htm
+    - .csv
+  auto_index: true                 # index the corpus automatically after upload
+
+# Search configuration
+search:
+  hybrid: false                    # Enable BM25 hybrid search (default: false)
+  bm25_weight: 1.0                # BM25 contribution weight in RRF fusion
+  dense_weight: 1.0                # Dense (FAISS) contribution weight in RRF fusion
+  rrf_k: 60                        # RRF constant (standard value)

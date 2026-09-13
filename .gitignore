@@ -1,0 +1,40 @@
+# Build artifacts
+*.egg-info/
+.egg-info/
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+
+# Internal docs and notes (not for public)
+docs/
+notes/
+openspec/
+
+# Service file (contains personal paths)
+guaipeca.service
+
+# Test data (too large for git)
+tests/fixtures/test-doc.pdf
+tests/fixtures/test-doc.md
+tests/INTEGRATION_TEST_REPORT.md
+
+# Runtime data
+*.fai
+data/
+~/.guaipeca/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*

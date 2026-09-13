@@ -1,0 +1,29 @@
+corpora:
+  - name: test-docs
+    path: ./tests/fixtures
+    topic: oracle-fcc
+    weight: 1.0
+    extensions: [".md", ".pdf"]
+
+upload:
+  allow: ["test-docs"]
+  max_file_size: 52428800
+  allowed_extensions: [".md", ".txt", ".pdf", ".docx"]
+  auto_index: true
+
+embedding:
+  model: all-MiniLM-L6-v2
+  dimensions: 384
+  cache_dir: ~/.guaipeca/models
+
+chunking:
+  max_size: 2000
+  overlap: 200
+  table_aware: true
+  split_on_headings: true
+
+indexing:
+  data_dir: ~/.guaipeca/data-test
+  incremental: true
+  max_file_size: 52428800
+  exclude_dirs: ["node_modules", ".git", "venv", "__pycache__"]
