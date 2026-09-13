@@ -1,7 +1,7 @@
 corpora:
   - name: test-docs
     path: ./tests/fixtures
-    topic: oracle-fcc
+    topic: "RAG & retrieval systems"
     weight: 1.0
     extensions: [".md", ".pdf"]
 

@@ -24,8 +24,9 @@ Guaipeca is a self-hosted retrieval-augmented generation (RAG) server that expos
 ## Quick Start
 
 ```bash
-# Install (from project root)
-cd projects/guaipeca
+# Clone and install
+git clone https://github.com/LuisEduardoAvila/guaipeca.git
+cd guaipeca
 pip install -e ".[all]"
 # pymupdf is included as a core dependency for PDF heading detection
 
@@ -219,7 +220,8 @@ For always-on deployment on Linux (e.g. Pi 5), install Guaipeca as a systemd ser
 ### 1. Create the service file
 
 ```bash
-sudo cp projects/guaipeca/guaipeca.service /etc/systemd/system/guaipeca.service
+# Copy the service file (or create manually — see below)
+sudo cp guaipeca.service /etc/systemd/system/guaipeca.service
 ```
 
 Or create it manually at `/etc/systemd/system/guaipeca.service`:
@@ -233,7 +235,7 @@ After=network.target
 Type=simple
 User=<your-user>
 Group=<your-group>
-WorkingDirectory=/path/to/projects/guaipeca
+WorkingDirectory=/path/to/guaipeca
 ExecStart=/path/to/guaipeca --config /home/<user>/.guaipeca/guaipeca.yaml serve --transport both --port 8090
 Restart=on-failure
 RestartSec=10
@@ -393,20 +395,20 @@ curl http://localhost:8090/health
 docker compose exec guaipeca guaipeca --config /data/config/guaipeca.yaml index
 ```
 
-### Using Pre-built Image (from ghcr.io)
+### Building from Source
 
 ```bash
-# Authenticate to ghcr.io (private repo)
-echo $GITHUB_TOKEN | docker login ghcr.io -u LuisEduardoAvila --password-stdin
-
-# Pull and run
-docker pull ghcr.io/luis-eduardo-avila/guaipeca:latest
+docker build -t guaipeca .
 docker run -d --name guaipeca \
   -p 8090:8090 \
   -v ./data:/data \
   --restart unless-stopped \
-  ghcr.io/luis-eduardo-avila/guaipeca:latest
+  guaipeca
 ```
+
+> **Note:** Pre-built images will be available on ghcr.io after the first
+> push to `main` triggers the CI/CD pipeline. Until then, build from source
+> using the command above.
 
 ### Container Data Layout
 
@@ -419,13 +421,6 @@ data/              → /data (mounted volume)
 ```
 
 The embedding model (~90MB) downloads to the volume on first run. Subsequent starts load from cache — no network needed.
-
-### Building from Source
-
-```bash
-docker build -t guaipeca:local .
-docker run -d --name guaipeca -p 8090:8090 -v ./data:/data guaipeca:local
-```
 
 ### Automated Rebuilds
 

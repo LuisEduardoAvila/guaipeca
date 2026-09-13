@@ -15,8 +15,7 @@ openspec/
 # Service file (contains personal paths)
 guaipeca.service
 
-# Test data (too large for git)
-tests/fixtures/test-doc.pdf
+# Test data
 tests/fixtures/test-doc.md
 tests/INTEGRATION_TEST_REPORT.md
 
