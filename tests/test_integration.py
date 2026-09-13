@@ -43,14 +43,14 @@ class TestPDFConversion:
         """Converted markdown should be non-empty."""
         md = converter.convert(test_pdf_path)
         assert len(md) > 0, "Converted markdown is empty"
-        assert len(md) > 10000, f"Converted markdown suspiciously small: {len(md)} chars"
+        assert len(md) > 3000, f"Converted markdown suspiciously small: {len(md)} chars"
 
     def test_conversion_contains_key_terms(self, converter, test_pdf_path):
-        """Converted markdown should contain Oracle FCC-related terms."""
+        """Converted markdown should contain RAG-related terms."""
         md = converter.convert(test_pdf_path)
         md_lower = md.lower()
         # At least some of these terms should appear
-        terms = ["consolidation", "financial", "oracle", "close"]
+        terms = ["embedding", "retrieval", "chunking", "vector"]
         found = [t for t in terms if t in md_lower]
         assert len(found) >= 3, f"Only found {found} of {terms} in converted text"
 
@@ -64,7 +64,7 @@ class TestPDFConversion:
         """The converted markdown file should exist on disk."""
         path = Path(test_md_path)
         assert path.exists(), f"Markdown file not found: {test_md_path}"
-        assert path.stat().st_size > 10000, "Markdown file too small"
+        assert path.stat().st_size > 3000, "Markdown file too small"
 
 
 # ===========================================================================
@@ -236,15 +236,15 @@ class TestSearch:
     def test_search_returns_results(self, indexed_corpus):
         """Search for a term should return results."""
         searcher = indexed_corpus
-        result = searcher.search("consolidation", top_k=5)
+        result = searcher.search("embedding", top_k=5)
         assert "error" not in result, f"Search error: {result.get('error')}"
-        assert result["total"] > 0, "No results for 'consolidation'"
+        assert result["total"] > 0, "No results for 'embedding'"
         assert len(result["results"]) > 0, "Empty results list"
 
     def test_search_results_have_required_fields(self, indexed_corpus):
         """Each result should have chunk_id, summary, location, corpus, score."""
         searcher = indexed_corpus
-        result = searcher.search("financial consolidation", top_k=3)
+        result = searcher.search("vector retrieval", top_k=3)
         for r in result["results"]:
             assert "chunk_id" in r, "Missing chunk_id"
             assert "summary" in r, "Missing summary"
@@ -254,9 +254,9 @@ class TestSearch:
             assert isinstance(r["score"], float), f"Score is not float: {type(r['score'])}"
 
     def test_search_relevant_terms(self, indexed_corpus):
-        """Search for Oracle FCC terms should return relevant results."""
+        """Search for RAG terms should return relevant results."""
         searcher = indexed_corpus
-        queries = ["consolidation", "financial", "currency", "journal", "close"]
+        queries = ["embedding", "retrieval", "chunking", "vector", "close"]
         for q in queries:
             result = searcher.search(q, top_k=3)
             assert result["total"] > 0, f"No results for query: '{q}'"
@@ -270,13 +270,13 @@ class TestSearch:
     def test_search_invalid_top_k(self, indexed_corpus):
         """top_k < 1 should return error."""
         searcher = indexed_corpus
-        result = searcher.search("consolidation", top_k=0)
+        result = searcher.search("embedding", top_k=0)
         assert "error" in result, "Expected error for top_k=0"
 
     def test_search_nonexistent_corpus(self, indexed_corpus):
         """Searching a nonexistent corpus should return error."""
         searcher = indexed_corpus
-        result = searcher.search("consolidation", top_k=5, corpora=["nonexistent"])
+        result = searcher.search("embedding", top_k=5, corpora=["nonexistent"])
         assert "error" in result, "Expected error for nonexistent corpus"
 
 
@@ -290,27 +290,27 @@ class TestTopK:
     def test_top_k_3(self, indexed_corpus):
         """top_k=3 should return at most 3 results."""
         searcher = indexed_corpus
-        result = searcher.search("consolidation", top_k=3)
+        result = searcher.search("embedding", top_k=3)
         assert result["total"] <= 3, f"Expected <=3 results, got {result['total']}"
         assert result["total"] > 0, "Expected at least 1 result"
 
     def test_top_k_10(self, indexed_corpus):
         """top_k=10 should return at most 10 results."""
         searcher = indexed_corpus
-        result = searcher.search("financial", top_k=10)
+        result = searcher.search("retrieval", top_k=10)
         assert result["total"] <= 10, f"Expected <=10 results, got {result['total']}"
         assert result["total"] > 0, "Expected at least 1 result"
 
     def test_top_k_1(self, indexed_corpus):
         """top_k=1 should return exactly 1 result (for a common term)."""
         searcher = indexed_corpus
-        result = searcher.search("consolidation", top_k=1)
+        result = searcher.search("embedding", top_k=1)
         assert result["total"] == 1, f"Expected exactly 1 result, got {result['total']}"
 
     def test_results_are_sorted_by_score(self, indexed_corpus):
         """Results should be sorted by score descending."""
         searcher = indexed_corpus
-        result = searcher.search("financial consolidation", top_k=5)
+        result = searcher.search("vector retrieval", top_k=5)
         scores = [r["score"] for r in result["results"]]
         assert scores == sorted(scores, reverse=True), "Results not sorted by score"
 
@@ -326,7 +326,7 @@ class TestGetChunk:
         """get_chunk should return full chunk text."""
         searcher = indexed_corpus
         # First search to get a chunk_id
-        result = searcher.search("consolidation", top_k=1)
+        result = searcher.search("embedding", top_k=1)
         assert result["total"] > 0
         chunk_id = result["results"][0]["chunk_id"]
 
@@ -367,7 +367,7 @@ class TestStaleFiltering:
     def test_search_filters_stale_results(self, indexed_corpus):
         """Search results should not include chunks from non-existent files."""
         searcher = indexed_corpus
-        result = searcher.search("consolidation", top_k=10)
+        result = searcher.search("embedding", top_k=10)
         for r in result["results"]:
             # The location field contains the source path
             location = r["location"]
@@ -384,12 +384,12 @@ class TestStaleFiltering:
 
         # Create a temporary file, index it, then delete it
         temp_file = tmp_path / "temp-doc.md"
-        temp_file.write_text("# Temp Document\n\nThis is about consolidation and financial close.")
+        temp_file.write_text("# Temp Document\n\nThis is about embedding and vector retrieval for RAG systems.")
 
         # We can't easily add a new corpus on the fly, so we test via the
         # existing corpus. Instead, verify that all current results point to
         # existing files.
-        result = searcher.search("consolidation", top_k=20)
+        result = searcher.search("embedding", top_k=20)
         for r in result["results"]:
             location = r["location"].split("#")[0]
             # At least check the path is a real file or relative to fixtures
@@ -409,14 +409,14 @@ class TestConcurrentSearch:
         """Multiple search threads should complete successfully."""
         searcher = indexed_corpus
         queries = [
-            "consolidation",
-            "financial close",
-            "currency translation",
-            "journal entry",
-            "data entry",
-            "report",
-            "approval workflow",
-            "dashboard",
+            "embedding",
+            "vector index",
+            "vector store",
+            "semantic search",
+            "chunking strategy",
+            "architecture",
+            "embedding model",
+            "reranking",
         ]
         results = {}
         errors = []
@@ -458,7 +458,7 @@ class TestConcurrentSearch:
         def search_task():
             barrier.wait()  # All threads start simultaneously
             for _ in range(3):
-                r = searcher.search("consolidation", top_k=3)
+                r = searcher.search("embedding", top_k=3)
                 results.append(r)
 
         threads = [threading.Thread(target=search_task) for _ in range(5)]
