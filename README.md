@@ -2,6 +2,8 @@
 
 **Lightweight configurable RAG MCP server — FAISS + fastembed + markitdown**
 
+> **Why "Guaipeca"?** — _Guaipeca_ is southern Brazilian slang (Tupi-Guarani origin) for a scrappy mutt — a _cusco_, no pedigree, no frills, but loyal and gets the job done. Seemed fitting for a lightweight RAG server with no API keys, no GPU, and no cloud dependencies.
+
 Guaipeca is a self-hosted retrieval-augmented generation (RAG) server that exposes semantic search over your document corpora via the Model Context Protocol (MCP). It uses a lightweight tech stack — FAISS indexes, fastembed (ONNX Runtime) embeddings, structure-aware chunking — and is fully configurable and decoupled from any specific memory system.
 
 ## Features
