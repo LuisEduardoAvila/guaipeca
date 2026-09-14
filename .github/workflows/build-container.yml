@@ -7,13 +7,18 @@ on:
   push:
     branches: [main]
     paths:
-      - 'projects/guaipeca/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'docker-entrypoint.sh'
+      - 'pyproject.toml'
       - '.github/workflows/build-container.yml'
   workflow_dispatch:  # Allow manual trigger
 
 env:
   IMAGE_NAME: ghcr.io/luis-eduardo-avila/guaipeca
-  CONTEXT: projects/guaipeca
+  CONTEXT: .
 
 jobs:
   build-and-push:
@@ -49,7 +54,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ${{ env.CONTEXT }}
-          file: ${{ env.CONTEXT }}/Dockerfile
+          file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |

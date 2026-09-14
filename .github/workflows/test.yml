@@ -7,12 +7,16 @@ on:
   push:
     branches: [main, develop]
     paths:
-      - 'projects/guaipeca/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
       - '.github/workflows/test.yml'
   pull_request:
     branches: [main]
     paths:
-      - 'projects/guaipeca/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
 
 jobs:
   test:
@@ -34,17 +38,14 @@ jobs:
           sudo apt-get install -y libxml2-dev libxslt-dev libffi-dev libjpeg-dev poppler-utils antiword
 
       - name: Install Guaipeca with dev dependencies
-        working-directory: projects/guaipeca
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[all,dev]"
 
       - name: Lint with ruff
-        working-directory: projects/guaipeca
         run: ruff check src/
 
       - name: Run tests
-        working-directory: projects/guaipeca
         run: python -m pytest tests/ -v --timeout=120 --tb=short
         env:
           HF_HUB_OFFLINE: '0'  # Allow model download for tests
