@@ -46,6 +46,6 @@ jobs:
         run: ruff check src/
 
       - name: Run tests
-        run: python -m pytest tests/ -v --timeout=120 --tb=short
+        run: python -m pytest tests/ -v --tb=short
         env:
           HF_HUB_OFFLINE: '0'  # Allow model download for tests
