@@ -16,7 +16,6 @@ openspec/
 guaipeca.service
 
 # Test data
-tests/fixtures/test-doc.md
 tests/INTEGRATION_TEST_REPORT.md
 
 # Runtime data
