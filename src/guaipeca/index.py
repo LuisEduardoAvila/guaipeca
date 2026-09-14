@@ -634,12 +634,14 @@ class CorpusIndex:
         for file_path in files:
             current_files.add(file_path)
 
+            # Compute file hash once (used for both change detection and storage)
+            file_hash = self._file_hash(file_path)
+
             # Check if file changed (incremental)
-            if not force and self.indexing.incremental:
-                fhash = self._file_hash(file_path)
-                if self._file_hashes.get(file_path) == fhash:
-                    files_skipped += 1
-                    continue
+            if not force and self.indexing.incremental and \
+                    self._file_hashes.get(file_path) == file_hash:
+                files_skipped += 1
+                continue
 
             # Convert to markdown
             try:
@@ -682,8 +684,8 @@ class CorpusIndex:
                 logger.error(f"Failed to embed {file_path}: {e}")
                 continue
 
-            # Update hash
-            self._file_hashes[file_path] = self._file_hash(file_path)
+            # Update hash (reuse cached hash from earlier)
+            self._file_hashes[file_path] = file_hash
             files_indexed += 1
             chunks_created += len(file_chunks)
 
@@ -758,7 +760,6 @@ class CorpusIndex:
             self._load()
             faiss_index = self._faiss_index
             chunks_snapshot = list(self._chunks)  # shallow copy for consistent reads
-            dict(self._stable_id_to_pos)
 
         if faiss_index is None or faiss_index.ntotal == 0:
             return []

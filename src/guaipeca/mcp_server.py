@@ -16,6 +16,7 @@ Transports:
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -168,9 +169,13 @@ def _sanitize_error_message(exc: Exception) -> str:
     leak system information. Full exception is logged internally.
     """
     msg = str(exc)
-    # Replace absolute paths with generic placeholder
+    # Replace absolute file paths with generic placeholder.
+    # Only match paths that look like real filesystem paths (3+ segments,
+    # or 2 segments with a file extension) to avoid sanitizing short
+    # slash-prefixed tokens like "/api/v1" in error messages.
     import re
-    msg = re.sub(r"/[^\s:<>]+", "[path]", msg)
+    _path_re = re.compile(r"(?:^|\s)/(?:[\w.-]+/){2,}[\w.-]+|(?:^|\s)/[\w.-]+/[\w-]+\.[\w]+")
+    msg = _path_re.sub(" [path]", msg)
     # Truncate overly long messages
     if len(msg) > 300:
         msg = msg[:300] + "..."
@@ -576,7 +581,7 @@ class GuaipecaMCPServer:
                 auth_header = self.headers.get("Authorization", "")
                 if auth_header.startswith("Bearer "):
                     token = auth_header[7:]
-                    return token == auth_token
+                    return hmac.compare_digest(token, auth_token)
                 return False
 
             def _send_json(self, code: int, data: dict):
@@ -678,6 +683,11 @@ class GuaipecaMCPServer:
                         session = sessions[session_id]
 
                     content_length = int(self.headers.get("Content-Length", 0))
+                    # Enforce max body size to prevent memory exhaustion
+                    max_body_size = 10 * 1024 * 1024  # 10MB limit
+                    if content_length > max_body_size:
+                        self._send_json(413, {"error": "request body too large"})
+                        return
                     body = self.rfile.read(content_length) if content_length > 0 else b"{}"
 
                     # Accept the request immediately (202 Accepted)
@@ -720,6 +730,13 @@ class GuaipecaMCPServer:
 
         logger.info(f"Starting Guaipeca MCP server (HTTP/SSE) on {host}:{actual_port}")
         print(f"Guaipeca MCP server listening on http://{host}:{actual_port}", file=sys.stderr)
+
+        import signal
+        def _handle_term(signum, frame):
+            logger.info("Received SIGTERM, shutting down HTTP server")
+            httpd.shutdown()
+        signal.signal(signal.SIGTERM, _handle_term)
+
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

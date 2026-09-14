@@ -175,6 +175,10 @@ class GuaipecaConfig:
             host=srv.get("host", "127.0.0.1"),
             auth_token=srv.get("auth_token"),
         )
+        # Allow env var override for auth token (security best practice)
+        env_token = os.environ.get("GUAIPECA_AUTH_TOKEN")
+        if env_token:
+            server.auth_token = env_token
 
         # Parse upload
         upl = data.get("upload", {})

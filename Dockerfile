@@ -23,18 +23,12 @@ WORKDIR /build
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
-# Install guaipeca's core deps + markitdown with specific extras only
-# fastembed uses onnxruntime (~46MB) instead of torch (~959MB)
+# Install guaipeca with all needed extras from pyproject.toml.
+# Letting pip resolve from pyproject.toml ensures deps stay in sync.
+# We use specific markitdown extras (not [all]) to avoid heavy deps.
+# fastembed uses onnxruntime (~46MB) instead of torch (~959MB).
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir \
-        "fastembed>=0.2.0" \
-        "faiss-cpu>=1.7.4" \
-        "numpy>=1.24.0" \
-        "pyyaml>=6.0" \
-        "pymupdf>=1.24.0" \
-        "bm25s>=0.2.0" \
-        "markitdown[pdf,docx,pptx,xlsx]>=0.0.1" && \
-    pip install --no-cache-dir --no-deps -e .
+    pip install --no-cache-dir -e ".[pdf,docx,pptx,xlsx,monitor]"
 
 # ─── Stage 2: Runtime ────────────────────────────────────────────
 FROM python:3.12-slim AS runtime
