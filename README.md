@@ -98,6 +98,7 @@ search:
   bm25_weight: 1.0           # BM25 contribution weight in RRF fusion
   dense_weight: 1.0          # Dense (FAISS) contribution weight in RRF fusion
   rrf_k: 60                  # RRF constant (higher = smoother ranking)
+  max_chars: 8000            # Threshold for auto return_mode (total result chars)
 ```
 
 ## Embedding Models
@@ -171,8 +172,13 @@ guaipeca index --force
 ### search
 Search across indexed corpora. Returns summary + location + score.
 ```
-search(query="HFM data audit", top_k=5, corpora=["epm-docs"], hybrid=true)
+search(query="HFM data audit", top_k=5, corpora=["epm-docs"], hybrid=true, return_mode="chunks")
 ```
+
+**return_mode** controls result granularity:
+- `chunks` (default) — returns individual chunks with summary, location, and score
+- `documents` — returns full source documents, deduplicated by path, with best chunk score as document score
+- `auto` — returns chunks if total result size < `search.max_chars` (default 8000), otherwise collapses to documents
 
 ### get_chunk
 Retrieve full chunk text by chunk_id from search results.

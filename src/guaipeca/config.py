@@ -78,6 +78,7 @@ class SearchConfig:
     bm25_weight: float = 1.0     # Weight for BM25 scores in RRF fusion
     dense_weight: float = 1.0   # Weight for dense (FAISS) scores in RRF fusion
     rrf_k: int = 60              # RRF constant (standard value from literature)
+    max_chars: int = 8000       # Threshold for auto return_mode (total result chars)
 
 
 @dataclass
@@ -201,6 +202,7 @@ class GuaipecaConfig:
             bm25_weight=srch.get("bm25_weight", 1.0),
             dense_weight=srch.get("dense_weight", 1.0),
             rrf_k=srch.get("rrf_k", 60),
+            max_chars=srch.get("max_chars", 8000),
         )
 
         config = cls(
@@ -260,6 +262,8 @@ class GuaipecaConfig:
             raise ValueError(f"search.dense_weight must be a non-negative number, got: {self.search.dense_weight!r}")
         if not isinstance(self.search.rrf_k, int) or self.search.rrf_k < 1:
             raise ValueError(f"search.rrf_k must be a positive integer, got: {self.search.rrf_k!r}")
+        if not isinstance(self.search.max_chars, int) or self.search.max_chars < 1:
+            raise ValueError(f"search.max_chars must be a positive integer, got: {self.search.max_chars!r}")
 
     def get_corpus(self, name: str) -> CorpusConfig | None:
         """Find a corpus by name."""

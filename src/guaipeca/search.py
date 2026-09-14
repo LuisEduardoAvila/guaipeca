@@ -7,6 +7,7 @@ Supports hybrid BM25 + FAISS dense search with Reciprocal Rank Fusion (RRF).
 from __future__ import annotations
 
 import logging
+import os
 
 from .config import GuaipecaConfig
 from .embedding import EmbeddingService
@@ -53,6 +54,8 @@ class Searcher:
         top_k: int = 5,
         corpora: list[str] | None = None,
         hybrid: bool | None = None,
+        return_mode: str = "chunks",
+        max_chars: int | None = None,
     ) -> dict:
         """
         Search across corpora.
@@ -62,9 +65,11 @@ class Searcher:
             top_k: Total results to return (across all corpora).
             corpora: Optional list of corpus names to search. None = all.
             hybrid: Enable BM25 hybrid search. None = use config default (search.hybrid).
+            return_mode: Result granularity — "chunks" (default), "documents", or "auto".
+            max_chars: Threshold for auto mode. None = use config default (search.max_chars).
 
         Returns:
-            Dict with results, total, query.
+            Dict with results, total, query, return_mode.
         """
         # Validate top_k
         if top_k < 1:
@@ -81,6 +86,18 @@ class Searcher:
                 "query": query[:100] + "...",
                 "error": f"Query too long ({len(query)} chars, max {MAX_QUERY_LENGTH})",
             }
+
+        # Validate return_mode
+        if return_mode not in ("chunks", "documents", "auto"):
+            return {
+                "results": [],
+                "total": 0,
+                "query": query,
+                "error": f"Invalid return_mode: {return_mode!r}. Must be 'chunks', 'documents', or 'auto'.",
+            }
+
+        # Determine max_chars threshold
+        chars_threshold = max_chars if max_chars is not None else self.config.search.max_chars
 
         # Determine which corpora to search
         search_corpora = corpora if corpora else list(self.corpora.keys())
@@ -137,12 +154,44 @@ class Searcher:
         # Trim to top_k
         final = all_results[:top_k]
 
-        return {
-            "results": final,
-            "total": len(final),
-            "query": query,
-            "hybrid": use_hybrid,
-        }
+        # Apply return_mode
+        if return_mode == "documents":
+            final = self._collapse_to_documents(final)
+            return {
+                "results": final,
+                "total": len(final),
+                "query": query,
+                "hybrid": use_hybrid,
+                "return_mode": "documents",
+            }
+        elif return_mode == "auto":
+            chunks_size = self._estimate_chunks_size(final)
+            if chunks_size < chars_threshold:
+                return {
+                    "results": final,
+                    "total": len(final),
+                    "query": query,
+                    "hybrid": use_hybrid,
+                    "return_mode": "chunks",
+                }
+            else:
+                final = self._collapse_to_documents(final)
+                return {
+                    "results": final,
+                    "total": len(final),
+                    "query": query,
+                    "hybrid": use_hybrid,
+                    "return_mode": "documents",
+                }
+        else:
+            # chunks mode (default)
+            return {
+                "results": final,
+                "total": len(final),
+                "query": query,
+                "hybrid": use_hybrid,
+                "return_mode": "chunks",
+            }
 
     def _rrf_fuse(
         self,
@@ -199,6 +248,93 @@ class Searcher:
             r["score"] = r["rrf_score"]
 
         return fused[:top_k]
+
+    def _collapse_to_documents(self, chunk_results: list[dict]) -> list[dict]:
+        """Collapse chunk results into document-level results.
+
+        Groups chunk results by source_path, reads the full document text
+        from disk, and returns one result per unique source document.
+
+        Document score = best (highest) chunk score from that document.
+
+        Args:
+            chunk_results: Sorted list of chunk result dicts.
+
+        Returns:
+            List of document-level result dicts, sorted by score descending.
+        """
+        # Group chunks by source_path
+        # Extract file path from location (before # heading separator)
+        docs: dict[str, dict] = {}
+        for chunk in chunk_results:
+            location = chunk.get("location", "")
+            source_path = location.split("#")[0] if "#" in location else location
+
+            if not source_path:
+                continue
+
+            # Skip if file no longer exists
+            if not os.path.exists(source_path):
+                continue
+
+            if source_path not in docs:
+                docs[source_path] = {
+                    "source_path": source_path,
+                    "corpus": chunk.get("corpus", ""),
+                    "topic": chunk.get("topic", ""),
+                    "score": chunk["score"],
+                    "matched_chunks": 1,
+                }
+            else:
+                # Update best score and count
+                docs[source_path]["score"] = max(docs[source_path]["score"], chunk["score"])
+                docs[source_path]["matched_chunks"] += 1
+
+        # Read full document text for each
+        doc_results = []
+        for source_path, info in docs.items():
+            try:
+                with open(source_path, "r", encoding="utf-8") as f:
+                    text = f.read()
+            except (OSError, UnicodeDecodeError) as e:
+                logger.warning(f"Could not read document {source_path}: {e}")
+                continue
+
+            doc_results.append({
+                "source_path": source_path,
+                "corpus": info["corpus"],
+                "topic": info["topic"],
+                "score": info["score"],
+                "text": text,
+                "char_count": len(text),
+                "matched_chunks": info["matched_chunks"],
+            })
+
+        # Sort by score descending
+        doc_results.sort(key=lambda r: r["score"], reverse=True)
+        return doc_results
+
+    def _estimate_chunks_size(self, chunk_results: list[dict]) -> int:
+        """Estimate total character count of chunk result texts.
+
+        Uses get_chunk to retrieve full text for each chunk result.
+
+        Args:
+            chunk_results: List of chunk result dicts.
+
+        Returns:
+            Total character count of all chunk texts.
+        """
+        total = 0
+        for chunk in chunk_results:
+            chunk_id = chunk.get("chunk_id", "")
+            full_chunk = self.get_chunk(chunk_id)
+            if full_chunk and "text" in full_chunk:
+                total += len(full_chunk["text"])
+            else:
+                # Fallback: estimate from summary length
+                total += len(chunk.get("summary", ""))
+        return total
 
     def get_chunk(self, chunk_id: str) -> dict | None:
         """

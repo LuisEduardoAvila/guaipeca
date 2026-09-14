@@ -66,6 +66,21 @@ TOOLS = [
                     "description": "Enable BM25 hybrid search (overrides config). Default: false.",
                     "default": False,
                 },
+                "return_mode": {
+                    "type": "string",
+                    "description": (
+                        "Result granularity: 'chunks' returns individual chunks (default), "
+                        "'documents' returns full source documents deduplicated by path, "
+                        "'auto' returns chunks if total size < max_chars threshold, "
+                        "otherwise documents."
+                    ),
+                    "default": "chunks",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Threshold for auto return_mode (total result chars). Default: 8000.",
+                    "default": 8000,
+                },
             },
             "required": ["query"],
         },
@@ -304,7 +319,12 @@ class GuaipecaMCPServer:
             top_k = arguments.get("top_k", 5)
             corpora = arguments.get("corpora")
             hybrid = arguments.get("hybrid")
-            result = self.searcher.search(query, top_k=top_k, corpora=corpora, hybrid=hybrid)
+            return_mode = arguments.get("return_mode", "chunks")
+            max_chars = arguments.get("max_chars")
+            result = self.searcher.search(
+                query, top_k=top_k, corpora=corpora, hybrid=hybrid,
+                return_mode=return_mode, max_chars=max_chars,
+            )
             return self._result_to_mcp(result)
 
         elif tool_name == "get_chunk":
