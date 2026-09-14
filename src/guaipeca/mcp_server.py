@@ -103,6 +103,45 @@ TOOLS = [
         },
     },
     {
+        "name": "get_document",
+        "description": (
+            "Retrieve the full converted text (markdown) of a document by "
+            "corpus name and source_path. Returns text content plus metadata "
+            "(filename, file size, chunk count)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "corpus": {
+                    "type": "string",
+                    "description": "Corpus name containing the document.",
+                },
+                "source_path": {
+                    "type": "string",
+                    "description": "Absolute path to the source file (from list_documents or search results).",
+                },
+            },
+            "required": ["corpus", "source_path"],
+        },
+    },
+    {
+        "name": "list_documents",
+        "description": (
+            "List all indexed documents in a corpus (or all corpora if no "
+            "corpus specified). Returns source_path, filename, chunk count, "
+            "file size, and last_indexed timestamp for each document."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "corpus": {
+                    "type": "string",
+                    "description": "Corpus name to list documents for, or omit for all corpora.",
+                },
+            },
+        },
+    },
+    {
         "name": "index",
         "description": (
             "Trigger indexing for a specific corpus or all corpora. "
@@ -332,6 +371,23 @@ class GuaipecaMCPServer:
             result = self.searcher.get_chunk(chunk_id)
             if result is None:
                 return self._error_result(f"Chunk not found: {chunk_id}")
+            return self._result_to_mcp(result)
+
+        elif tool_name == "get_document":
+            corpus = arguments.get("corpus", "")
+            source_path = arguments.get("source_path", "")
+            result = self.searcher.get_document(corpus, source_path)
+            if result is None:
+                return self._error_result(
+                    f"Document not found: {source_path} in corpus {corpus}"
+                )
+            return self._result_to_mcp(result)
+
+        elif tool_name == "list_documents":
+            corpus = arguments.get("corpus")
+            result = self.searcher.list_documents(corpus=corpus)
+            if "error" in result:
+                return self._error_result(result["error"])
             return self._result_to_mcp(result)
 
         elif tool_name == "index":
@@ -676,6 +732,70 @@ class GuaipecaMCPServer:
                         self._send_json(401, {"error": "unauthorized"})
                         return
                     self._send_json(200, {"tools": TOOLS})
+                    return
+
+                # File download endpoint: /download/{corpus}/{filename}
+                if parsed.path.startswith("/download/"):
+                    if not self._check_auth():
+                        self._send_json(401, {"error": "unauthorized"})
+                        return
+
+                    # Parse corpus and filename from path
+                    # URL path: /download/{corpus}/{filename}
+                    parts = parsed.path.split("/", 3)  # ['', 'download', 'corpus', 'filename']
+                    if len(parts) < 4:
+                        self._send_json(400, {"error": "path must be /download/{corpus}/{filename}"})
+                        return
+
+                    corpus_name = parts[2]
+                    filename = urllib.parse.unquote(parts[3])
+
+                    # Path traversal protection: reject .. and absolute paths
+                    if ".." in filename or filename.startswith("/"):
+                        self._send_json(400, {"error": "invalid filename"})
+                        return
+                    if ".." in corpus_name or corpus_name.startswith("/"):
+                        self._send_json(400, {"error": "invalid corpus"})
+                        return
+
+                    # Look up corpus in config
+                    corpus_cfg = server_instance.config.get_corpus(corpus_name)
+                    if corpus_cfg is None:
+                        self._send_json(404, {"error": f"corpus not found: {corpus_name}"})
+                        return
+
+                    # Resolve file path within corpus directory
+                    corpus_path = Path(corpus_cfg.path)
+                    file_path = corpus_path / filename
+
+                    # Final safety check: ensure resolved path is within corpus
+                    try:
+                        file_path.resolve().relative_to(corpus_path.resolve())
+                    except ValueError:
+                        self._send_json(400, {"error": "path outside corpus directory"})
+                        return
+
+                    if not file_path.exists() or not file_path.is_file():
+                        self._send_json(404, {"error": f"file not found: {filename}"})
+                        return
+
+                    # Serve the file with proper headers
+                    import mimetypes
+                    content_type, _ = mimetypes.guess_type(str(file_path))
+                    if content_type is None:
+                        content_type = "application/octet-stream"
+
+                    file_size = file_path.stat().st_size
+                    self.send_response(200)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(file_size))
+                    self.send_header(
+                        "Content-Disposition",
+                        f'attachment; filename="{filename}"'
+                    )
+                    self.end_headers()
+                    with open(file_path, "rb") as f:
+                        self.wfile.write(f.read())
                     return
 
                 # Unknown path

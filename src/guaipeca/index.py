@@ -339,6 +339,8 @@ class CorpusIndex:
                 "chunk_id": f"{self.corpus.name}:{chunk.id}",
                 "summary": chunk.summary,
                 "location": f"{chunk.source_path}#{chunk.heading}".rstrip("#"),
+                "source_path": chunk.source_path,
+                "filename": os.path.basename(chunk.source_path),
                 "corpus": self.corpus.name,
                 "topic": self.corpus.topic,
                 "score": weighted_score,
@@ -794,6 +796,8 @@ class CorpusIndex:
                 "chunk_id": f"{self.corpus.name}:{stable_id}",
                 "summary": chunk.summary,
                 "location": f"{chunk.source_path}#{chunk.heading}".rstrip("#"),
+                "source_path": chunk.source_path,
+                "filename": os.path.basename(chunk.source_path),
                 "corpus": self.corpus.name,
                 "topic": self.corpus.topic,
                 "score": weighted_score,
@@ -830,6 +834,95 @@ class CorpusIndex:
                 "heading": chunk.heading,
                 "corpus": self.corpus.name,
                 "char_count": chunk.char_count,
+            }
+
+    def list_documents(self) -> list[dict]:
+        """List all indexed documents in this corpus.
+
+        Returns metadata for each tracked file: source_path, filename,
+        chunk count, file size, and last_indexed timestamp.
+        """
+        with self._rwlock.read_lock():
+            self._load()
+
+            # Count chunks per source_path
+            chunk_counts: dict[str, int] = {}
+            for chunk in self._chunks:
+                chunk_counts[chunk.source_path] = (
+                    chunk_counts.get(chunk.source_path, 0) + 1
+                )
+
+            docs = []
+            for source_path in self._file_hashes:
+                filename = os.path.basename(source_path)
+                try:
+                    file_size = os.path.getsize(source_path)
+                except OSError:
+                    file_size = 0
+
+                # Get last_indexed from metadata file mtime
+                try:
+                    mtime = os.path.getmtime(str(self.metadata_path))
+                    last_indexed = int(mtime)
+                except OSError:
+                    last_indexed = 0
+
+                docs.append({
+                    "source_path": source_path,
+                    "filename": filename,
+                    "corpus": self.corpus.name,
+                    "chunk_count": chunk_counts.get(source_path, 0),
+                    "file_size": file_size,
+                    "last_indexed": last_indexed,
+                })
+            return docs
+
+    def get_document_text(self, source_path: str) -> dict | None:
+        """Get full converted text of a document by source_path.
+
+        Args:
+            source_path: Absolute path to the source file within this corpus.
+
+        Returns:
+            Dict with text, source_path, filename, corpus, file_size,
+            chunk_count, or None if not found.
+        """
+        with self._rwlock.read_lock():
+            self._load()
+
+            # Check if this file is tracked
+            if source_path not in self._file_hashes:
+                return None
+
+            # Check if file exists on disk
+            if not os.path.exists(source_path):
+                return None
+
+            # Convert the file to markdown text
+            try:
+                text = self.converter.convert(source_path)
+            except Exception as e:
+                logger.error(f"Failed to convert {source_path}: {e}")
+                return None
+
+            # Count chunks for this document
+            chunk_count = sum(
+                1 for c in self._chunks if c.source_path == source_path
+            )
+
+            try:
+                file_size = os.path.getsize(source_path)
+            except OSError:
+                file_size = 0
+
+            return {
+                "source_path": source_path,
+                "filename": os.path.basename(source_path),
+                "corpus": self.corpus.name,
+                "text": text,
+                "char_count": len(text),
+                "file_size": file_size,
+                "chunk_count": chunk_count,
             }
 
     @property

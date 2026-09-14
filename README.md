@@ -9,7 +9,7 @@ Guaipeca is a self-hosted retrieval-augmented generation (RAG) server that expos
 ## Features
 
 - **Multi-corpus** — define multiple document folders, each with its own weight and topic label
-- **MCP-native** — exposes `search`, `get_chunk`, `index`, `status`, `list_folders`, and `upload` tools via MCP
+- **MCP-native** — exposes `search`, `get_chunk`, `get_document`, `list_documents`, `index`, `status`, `list_folders`, and `upload` tools via MCP
 - **Dual transport** — stdio (for local LLM integration) + HTTP (for remote/network access)
 - **Hybrid search** — optional BM25 sparse keyword search fused with FAISS dense vectors via Reciprocal Rank Fusion (RRF)
 - **Any document format** — pymupdf (PDFs with font-based heading detection) + markitdown (DOCX, PPTX, XLSX, HTML → markdown)
@@ -184,6 +184,19 @@ search(query="HFM data audit", top_k=5, corpora=["epm-docs"], hybrid=true, retur
 Retrieve full chunk text by chunk_id from search results.
 ```
 get_chunk(chunk_id="epm-docs:a1b2c3d4e5f67890")
+```
+
+### get_document
+Retrieve the full converted text (markdown) of a document by corpus and source_path. Returns text content plus metadata (filename, file size, chunk count).
+```
+get_document(corpus="epm-docs", source_path="/path/to/docs/report.pdf")
+```
+
+### list_documents
+List all indexed documents in a corpus (or all corpora if no corpus specified). Returns source_path, filename, chunk count, file size, and last_indexed timestamp.
+```
+list_documents(corpus="epm-docs")
+list_documents()  # all corpora
 ```
 
 ### index
@@ -446,6 +459,12 @@ See `docs/container-deployment.md` for detailed VM deployment instructions.
 - **Authentication:** Set `auth_token` in the server config to require
   `Authorization: Bearer <token>` headers on HTTP requests. When auth is enabled,
   CORS is restricted (no wildcard origin).
+- **HTTP endpoints:**
+  - `GET /sse` — SSE stream for MCP transport
+  - `POST /messages` — JSON-RPC messages
+  - `GET /health` — health check
+  - `GET /tools` — list available tools
+  - `GET /download/{corpus}/{filename}` — download original file (requires auth, path traversal protected)
 - **Error messages:** Client error responses are sanitized to avoid leaking
   internal file paths or library details.
 

@@ -302,6 +302,7 @@ class Searcher:
 
             doc_results.append({
                 "source_path": source_path,
+                "filename": os.path.basename(source_path),
                 "corpus": info["corpus"],
                 "topic": info["topic"],
                 "score": info["score"],
@@ -354,6 +355,47 @@ class Searcher:
             return None
 
         return self.corpora[corpus_name].get_chunk(stable_id)
+
+    def list_documents(self, corpus: str | None = None) -> dict:
+        """
+        List indexed documents across all corpora or a specific corpus.
+
+        Args:
+            corpus: Optional corpus name to filter. None = all corpora.
+
+        Returns:
+            Dict with 'documents' list and 'total' count.
+        """
+        documents = []
+
+        if corpus is not None:
+            if corpus not in self.corpora:
+                return {"error": f"corpus not found: {corpus}"}
+            documents = self.corpora[corpus].list_documents()
+        else:
+            for corpus_idx in self.corpora.values():
+                documents.extend(corpus_idx.list_documents())
+
+        return {
+            "documents": documents,
+            "total": len(documents),
+        }
+
+    def get_document(self, corpus: str, source_path: str) -> dict | None:
+        """
+        Get full converted text of a document by corpus and source_path.
+
+        Args:
+            corpus: Corpus name.
+            source_path: Absolute path to the source file.
+
+        Returns:
+            Document dict with text and metadata, or None if not found.
+        """
+        if corpus not in self.corpora:
+            return None
+
+        return self.corpora[corpus].get_document_text(source_path)
 
     def index_corpus(self, corpus_name: str = "all", force: bool = False) -> dict:
         """
