@@ -275,7 +275,6 @@ class CorpusIndex:
             try:
                 self._bm25_retriever = bm25s.BM25.load(
                     str(self.bm25_path),
-                    load_data=True,
                 )
                 logger.debug(f"Loaded BM25 index for '{self.corpus.name}'")
             except Exception as e:
