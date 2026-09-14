@@ -17,7 +17,7 @@ on:
   workflow_dispatch:  # Allow manual trigger
 
 env:
-  IMAGE_NAME: ghcr.io/luis-eduardo-avila/guaipeca
+  IMAGE_NAME: ghcr.io/LuisEduardoAvila/guaipeca
   CONTEXT: .
 
 jobs:
