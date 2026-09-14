@@ -16,7 +16,6 @@ import hashlib
 import logging
 import time
 from collections import OrderedDict
-from typing import Optional
 
 import numpy as np
 
@@ -56,7 +55,7 @@ class _EmbeddingCache:
             return True
         return time.time() - self._timestamps[key] > self.ttl
 
-    def get(self, key: str) -> Optional[np.ndarray]:
+    def get(self, key: str) -> np.ndarray | None:
         """
         Get item from cache.
 
@@ -174,7 +173,7 @@ class EmbeddingService:
     def __init__(
         self,
         model_name: str = "all-MiniLM-L6-v2",
-        cache_dir: Optional[str] = None,
+        cache_dir: str | None = None,
         dimensions: int = 384,
         preprocess: bool = True,
         cache_ttl_seconds: int = 3600,

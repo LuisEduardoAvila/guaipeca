@@ -9,7 +9,6 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
@@ -103,7 +102,7 @@ class ServerConfig:
     transport: str = "both"  # stdio | http | both
     port: int = 8090
     host: str = "127.0.0.1"  # P1-5: default to localhost for security
-    auth_token: Optional[str] = None  # P1-5: optional Bearer token auth
+    auth_token: str | None = None  # P1-5: optional Bearer token auth
 
 
 @dataclass
@@ -116,10 +115,10 @@ class GuaipecaConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     upload: UploadConfig = field(default_factory=UploadConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
-    config_path: Optional[str] = None
+    config_path: str | None = None
 
     @classmethod
-    def from_yaml(cls, path: str) -> "GuaipecaConfig":
+    def from_yaml(cls, path: str) -> GuaipecaConfig:
         """Load config from a YAML file."""
         path = os.path.expanduser(path)
         with open(path, "r") as f:
@@ -258,7 +257,7 @@ class GuaipecaConfig:
         if not isinstance(self.search.rrf_k, int) or self.search.rrf_k < 1:
             raise ValueError(f"search.rrf_k must be a positive integer, got: {self.search.rrf_k!r}")
 
-    def get_corpus(self, name: str) -> Optional[CorpusConfig]:
+    def get_corpus(self, name: str) -> CorpusConfig | None:
         """Find a corpus by name."""
         for c in self.corpora:
             if c.name == name:

@@ -23,7 +23,7 @@ import sys
 import threading
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .config import GuaipecaConfig
 from .converter import Converter
@@ -253,7 +253,7 @@ class GuaipecaMCPServer:
             )
             # Don't block startup — model will be loaded lazily on first use
 
-    def handle_request(self, method: str, params: dict) -> Optional[dict]:
+    def handle_request(self, method: str, params: dict) -> dict | None:
         """
         Handle a single MCP JSON-RPC request.
 
@@ -393,7 +393,6 @@ class GuaipecaMCPServer:
             Result dict with saved path and optional index stats.
         """
         import base64
-        import time
 
         # Validate corpus exists and is upload-enabled
         if corpus_name not in self.config.upload.allow:
@@ -468,7 +467,7 @@ class GuaipecaMCPServer:
 
     # ---- shared JSON-RPC processing ----
 
-    def _process_jsonrpc(self, raw_body: bytes) -> Optional[dict]:
+    def _process_jsonrpc(self, raw_body: bytes) -> dict | None:
         """Process a raw JSON-RPC request body and return a response dict.
 
         Shared between stdio and HTTP POST handlers to avoid duplication.
@@ -546,7 +545,7 @@ class GuaipecaMCPServer:
         """
         import http.server
         import urllib.parse
-        from queue import Queue, Empty
+        from queue import Empty, Queue
 
         server_instance = self
         auth_token = self.config.server.auth_token
@@ -554,7 +553,7 @@ class GuaipecaMCPServer:
         cors_origin = "*" if not auth_token else "null"
 
         # Session management: each SSE connection gets a session with a message queue
-        sessions: dict[str, "SSESession"] = {}
+        sessions: dict[str, SSESession] = {}
         sessions_lock = threading.Lock()
 
         class SSESession:

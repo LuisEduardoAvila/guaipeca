@@ -10,9 +10,9 @@ Adapted from a structure-aware chunking strategy:
 
 from __future__ import annotations
 
-import re
 import hashlib
 import logging
+import re
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)

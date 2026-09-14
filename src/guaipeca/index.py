@@ -16,20 +16,19 @@ Production safety features:
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import logging
 import os
 import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
 from .chunking import Chunk, chunk_file
-from .config import CorpusConfig, ChunkingConfig, IndexingConfig
+from .config import ChunkingConfig, CorpusConfig, IndexingConfig
 from .converter import Converter
 from .embedding import EmbeddingService
 
@@ -114,7 +113,7 @@ class CorpusIndex:
         chunking: ChunkingConfig,
         indexing: IndexingConfig,
         embedding_service,
-        converter: Optional[Converter] = None,
+        converter: Converter | None = None,
     ):
         """
         Args:
@@ -403,7 +402,6 @@ class CorpusIndex:
         if self._loaded:
             return
 
-        import faiss
 
         # Load file hashes
         if self.hashes_path.exists():
@@ -490,7 +488,7 @@ class CorpusIndex:
             self._lock_fd = open(self.lock_path, "w")
             fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             return True
-        except (IOError, OSError):
+        except OSError:
             # Lock is held by another process
             if hasattr(self, "_lock_fd") and self._lock_fd:
                 self._lock_fd.close()
@@ -503,7 +501,7 @@ class CorpusIndex:
                 import fcntl
                 fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_UN)
                 self._lock_fd.close()
-            except (IOError, OSError, ImportError):
+            except (OSError, ImportError):
                 pass
             self._lock_fd = None
 
@@ -761,7 +759,7 @@ class CorpusIndex:
             self._load()
             faiss_index = self._faiss_index
             chunks_snapshot = list(self._chunks)  # shallow copy for consistent reads
-            stable_id_map = dict(self._stable_id_to_pos)
+            dict(self._stable_id_to_pos)
 
         if faiss_index is None or faiss_index.ntotal == 0:
             return []
@@ -808,7 +806,7 @@ class CorpusIndex:
 
         return results
 
-    def get_chunk(self, stable_id: str) -> Optional[dict]:
+    def get_chunk(self, stable_id: str) -> dict | None:
         """Get full chunk content by stable chunk ID.
 
         Args:

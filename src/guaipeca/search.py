@@ -7,7 +7,6 @@ Supports hybrid BM25 + FAISS dense search with Reciprocal Rank Fusion (RRF).
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from .config import GuaipecaConfig
 from .embedding import EmbeddingService
@@ -52,8 +51,8 @@ class Searcher:
         self,
         query: str,
         top_k: int = 5,
-        corpora: Optional[list[str]] = None,
-        hybrid: Optional[bool] = None,
+        corpora: list[str] | None = None,
+        hybrid: bool | None = None,
     ) -> dict:
         """
         Search across corpora.
@@ -201,7 +200,7 @@ class Searcher:
 
         return fused[:top_k]
 
-    def get_chunk(self, chunk_id: str) -> Optional[dict]:
+    def get_chunk(self, chunk_id: str) -> dict | None:
         """
         Get full chunk content by chunk_id.
 
@@ -233,7 +232,7 @@ class Searcher:
         """
         if corpus_name == "all":
             all_stats = []
-            for name, corpus_idx in self.corpora.items():
+            for corpus_idx in self.corpora.values():
                 stats = corpus_idx.index(force=force)
                 all_stats.append(stats)
             return {"corpora": all_stats}

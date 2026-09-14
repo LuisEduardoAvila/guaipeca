@@ -7,10 +7,9 @@ Converts PDF, DOCX, PPTX, XLSX, HTML and other formats to markdown.
 from __future__ import annotations
 
 import hashlib
-import os
 import logging
+import os
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +34,7 @@ _MAX_HEADING_LEVELS = 6
 class Converter:
     """Document converter using markitdown."""
 
-    def __init__(self, cache_dir: Optional[str] = None):
+    def __init__(self, cache_dir: str | None = None):
         """
         Args:
             cache_dir: Directory to cache converted output. If None, no caching.
@@ -68,7 +67,7 @@ class Converter:
                 h.update(chunk)
         return h.hexdigest()
 
-    def _cache_path(self, file_path: str, file_hash: str) -> Optional[Path]:
+    def _cache_path(self, file_path: str, file_hash: str) -> Path | None:
         """Get cache file path for a given source file."""
         if not self.cache_dir:
             return None
@@ -89,7 +88,7 @@ class Converter:
         """
         if self._pymupdf_available is None:
             try:
-                import pymupdf  # noqa: F401
+                import pymupdf
                 self._pymupdf_available = True
             except ImportError:
                 self._pymupdf_available = False

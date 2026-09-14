@@ -17,7 +17,6 @@ from pathlib import Path
 
 from .config import GuaipecaConfig
 
-
 DEFAULT_CONFIG_PATHS = [
     "~/.guaipeca/guaipeca.yaml",
     "./guaipeca.yaml",
@@ -125,7 +124,7 @@ def cmd_search(args):
     print(f"\nQuery: {result['query']}")
     print(f"Results: {result['total']}")
     if result.get('hybrid'):
-        print(f"Mode: hybrid (BM25 + FAISS)")
+        print("Mode: hybrid (BM25 + FAISS)")
     print()
 
     for i, r in enumerate(result["results"], 1):
@@ -151,10 +150,10 @@ def cmd_status(args):
     searcher = Searcher(config=config, embedding_service=embedder)
 
     status = searcher.status
-    print(f"\nGuaipeca Status")
+    print("\nGuaipeca Status")
     print(f"  Embedding model: {status['embedding_model']}")
     print(f"  Dimensions: {status['dimensions']}")
-    print(f"\n  Corpora:")
+    print("\n  Corpora:")
     for c in status["corpora"]:
         print(f"    [{c['corpus']}]")
         print(f"      Total chunks: {c['total_chunks']}")

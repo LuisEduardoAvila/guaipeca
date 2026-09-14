@@ -42,6 +42,15 @@ where = ["src"]
 line-length = 100
 target-version = "py310"
 
+[tool.ruff.lint]
+ignore = [
+    "BLE001",  # Blind except: intentional for server resilience
+    "S110",    # try-except-pass: acceptable in cleanup paths
+    "TRY004",  # TypeError vs Exception: not worth the churn
+    "SIM115",  # Context manager for files: handled with atomic writes
+    "G201",    # logging.error vs .exception: intentional choice
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
