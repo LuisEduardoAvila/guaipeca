@@ -2,6 +2,7 @@
 
 Searches across all configured corpora, applies corpus weights, merges and sorts results.
 Supports hybrid BM25 + FAISS dense search with Reciprocal Rank Fusion (RRF).
+ToC-aware features: section aggregation, section filtering, keyword re-ranking.
 """
 
 from __future__ import annotations
@@ -56,6 +57,8 @@ class Searcher:
         hybrid: bool | None = None,
         return_mode: str = "chunks",
         max_chars: int | None = None,
+        section_mode: bool = False,
+        section_filter: str | None = None,
     ) -> dict:
         """
         Search across corpora.
@@ -65,8 +68,10 @@ class Searcher:
             top_k: Total results to return (across all corpora).
             corpora: Optional list of corpus names to search. None = all.
             hybrid: Enable BM25 hybrid search. None = use config default (search.hybrid).
-            return_mode: Result granularity — "chunks" (default), "documents", or "auto".
+            return_mode: Result granularity -- "chunks" (default), "documents", or "auto".
             max_chars: Threshold for auto mode. None = use config default (search.max_chars).
+            section_mode: If True, group results by section and return full section text.
+            section_filter: If specified, restrict search to chunks within the given section.
 
         Returns:
             Dict with results, total, query, return_mode.
@@ -126,6 +131,14 @@ class Searcher:
                 "error": "No indexed content found. Run 'guaipeca index' first.",
             }
 
+        # If section_filter is specified, use section-restricted search
+        if section_filter:
+            return self._search_with_section_filter(
+                query, top_k=top_k,
+                corpora=search_corpora, hybrid=use_hybrid,
+                section_filter=section_filter,
+            )
+
         # Embed query (always needed for dense search)
         query_vector = self.embedder.embed_query(query)
 
@@ -151,8 +164,17 @@ class Searcher:
         # Sort by weighted score (descending)
         all_results.sort(key=lambda r: r["score"], reverse=True)
 
+        # Apply ToC re-ranking if enabled (Phase 5)
+        if getattr(self.config.search, 'toc_rerank', False):
+            all_results = self._rerank_by_toc(all_results, query)
+            all_results.sort(key=lambda r: r["score"], reverse=True)
+
         # Trim to top_k
         final = all_results[:top_k]
+
+        # If section_mode is True, aggregate results by section (Phase 2)
+        if section_mode:
+            return self._aggregate_sections(final, query, use_hybrid)
 
         # Apply return_mode
         if return_mode == "documents":
@@ -396,6 +418,209 @@ class Searcher:
             return None
 
         return self.corpora[corpus].get_document_text(source_path)
+
+    # ---- ToC-Aware Feature Methods ----
+
+    def _search_with_section_filter(
+        self,
+        query: str,
+        top_k: int,
+        corpora: list[str],
+        hybrid: bool,
+        section_filter: str,
+    ) -> dict:
+        """Search restricted to a specific section (Phase 4).
+
+        Args:
+            query: Search query text.
+            top_k: Number of results to return.
+            corpora: List of corpus names to search.
+            hybrid: Whether to use hybrid BM25+FAISS.
+            section_filter: Section ID or heading_path prefix to filter by.
+
+        Returns:
+            Dict with results, total, query, section_filter.
+        """
+        query_vector = self.embedder.embed_query(query)
+
+        all_results = []
+        section_found = False
+
+        for name in corpora:
+            corpus_idx = self.corpora[name]
+            results = corpus_idx.search_section(query_vector, section_filter, top_k=top_k)
+            if results:
+                section_found = True
+            # Also try BM25 if hybrid
+            if hybrid:
+                # For BM25, get all results and filter by section
+                bm25_results = corpus_idx.search_bm25(query, top_k=top_k * 3)
+                # Filter BM25 results to only those in the matching sections
+                with corpus_idx._rwlock.read_lock():
+                    corpus_idx._load()
+                    section_map = dict(corpus_idx._section_map)
+                section_chunk_ids = set()
+                for sid, cids in section_map.items():
+                    # Direct match
+                    if sid == section_filter:
+                        section_chunk_ids.update(cids)
+                        section_found = True
+                        continue
+                    # Heading_path prefix match: check if any chunk in this section
+                    # has a heading_path starting with the filter text
+                    for cid in cids:
+                        pos = corpus_idx._stable_id_to_pos.get(cid)
+                        if pos is not None and pos < len(corpus_idx._chunks):
+                            chunk = corpus_idx._chunks[pos]
+                            if chunk.heading_path:
+                                # Check if the filter matches as a prefix of the joined heading_path
+                                joined = " ".join(chunk.heading_path)
+                                if joined.lower().startswith(section_filter.lower()):
+                                    section_chunk_ids.update(cids)
+                                    section_found = True
+                                    break
+
+                filtered_bm25 = [
+                    r for r in bm25_results
+                    if r["chunk_id"].split(":", 1)[1] in section_chunk_ids
+                ]
+                if filtered_bm25:
+                    fused = self._rrf_fuse(results, filtered_bm25, top_k=top_k)
+                    all_results.extend(fused)
+                else:
+                    all_results.extend(results)
+            else:
+                all_results.extend(results)
+
+        if not section_found:
+            return {
+                "results": [],
+                "total": 0,
+                "query": query,
+                "hybrid": hybrid,
+                "section_filter": section_filter,
+                "error": f"section not found: {section_filter}",
+            }
+
+        all_results.sort(key=lambda r: r["score"], reverse=True)
+        final = all_results[:top_k]
+
+        return {
+            "results": final,
+            "total": len(final),
+            "query": query,
+            "hybrid": hybrid,
+            "section_filter": section_filter,
+        }
+
+    def _aggregate_sections(self, results: list[dict], query: str, hybrid: bool) -> dict:
+        """Aggregate search results by section, returning full section text (Phase 2).
+
+        For each unique section in results, fetch all chunks in that section,
+        concatenate them (sorted by char_offset), and return the full section text.
+
+        Non-structured documents (empty heading_path) have a single "unstructured:{hash}"
+        section_id -- all their chunks are returned as one block.
+        """
+        section_results = []
+        seen_sections = set()
+
+        for r in results:
+            section_id = r.get("section_id", "")
+            if not section_id or section_id in seen_sections:
+                continue
+            seen_sections.add(section_id)
+
+            # Determine which corpus this result is from
+            corpus_name = r.get("corpus", "")
+            if corpus_name not in self.corpora:
+                continue
+
+            corpus_idx = self.corpora[corpus_name]
+            section_chunks = corpus_idx.get_section_chunks(section_id)
+
+            if not section_chunks:
+                continue
+
+            # Sort by char_offset (already done in get_section_chunks, but ensure)
+            section_chunks.sort(key=lambda c: c.char_offset)
+
+            # Concatenate all chunk texts
+            full_text = "\n\n".join(c.text for c in section_chunks)
+
+            # Get heading info from first chunk
+            first_chunk = section_chunks[0]
+            heading_path = first_chunk.heading_path
+            heading = first_chunk.heading
+
+            section_results.append({
+                "section_id": section_id,
+                "heading": heading,
+                "heading_path": heading_path,
+                "text": full_text,
+                "chunk_count": len(section_chunks),
+                "corpus": corpus_name,
+                "location": f"{first_chunk.source_path}#{heading}".rstrip("#"),
+                "source_path": first_chunk.source_path,
+                "filename": r.get("filename", ""),
+                "score": r["score"],
+                "summary": heading or " ".join(full_text[:200].split()),
+            })
+
+        return {
+            "results": section_results,
+            "total": len(section_results),
+            "query": query,
+            "hybrid": hybrid,
+            "section_mode": True,
+        }
+
+    def _rerank_by_toc(self, results: list[dict], query: str) -> list[dict]:
+        """Re-rank results by keyword overlap between query and heading_path terms (Phase 5).
+
+        For each result, compute the overlap between query terms and heading_path terms.
+        Score adjustment = (overlapping_terms / total_query_terms) * toc_rerank_weight.
+        Results with empty heading_path are not re-ranked (pass through unchanged).
+        """
+        weight = getattr(self.config.search, 'toc_rerank_weight', 0.3)
+        query_terms = set(query.lower().split())
+        if not query_terms:
+            return results
+
+        for r in results:
+            heading_path = r.get("heading_path", [])
+            if not heading_path:
+                continue  # Non-structured doc: no re-ranking
+
+            # Collect all terms from heading_path
+            heading_terms = set()
+            for h in heading_path:
+                heading_terms.update(h.lower().split())
+
+            # Compute overlap
+            overlapping = query_terms & heading_terms
+            overlap_ratio = len(overlapping) / len(query_terms) if query_terms else 0
+            boost = overlap_ratio * weight
+
+            r["score"] = r["score"] + boost
+
+        return results
+
+    def get_toc(self, corpus: str, document: str | None = None) -> dict:
+        """Get table of contents for a corpus or specific document (Phase 3).
+
+        Args:
+            corpus: Corpus name.
+            document: Optional source path of a specific document.
+
+        Returns:
+            ToC tree dict or error dict.
+        """
+        if corpus not in self.corpora:
+            return {"error": f"corpus not found: {corpus}"}
+
+        corpus_idx = self.corpora[corpus]
+        return corpus_idx.get_toc_tree(source_path=document)
 
     def index_corpus(self, corpus_name: str = "all", force: bool = False) -> dict:
         """

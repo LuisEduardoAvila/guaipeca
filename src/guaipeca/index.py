@@ -147,6 +147,12 @@ class CorpusIndex:
         self._loaded = False
         # Stable ID → FAISS positional index lookup map
         self._stable_id_to_pos: dict[str, int] = {}
+        # ToC-aware: section_id → list of chunk_ids
+        self._section_map: dict[str, list[str]] = {}
+        # ToC-aware: source_path → toc tree dict
+        self._toc_trees: dict[str, dict] = {}
+        # ToC-aware: section_id → list of FAISS positions
+        self._section_to_positions: dict[str, list[int]] = {}
 
         # BM25 state
         self._bm25_retriever = None
@@ -217,6 +223,110 @@ class CorpusIndex:
         self._stable_id_to_pos = {
             chunk.id: pos for pos, chunk in enumerate(self._chunks)
         }
+        # Also rebuild section_to_positions
+        self._section_to_positions = {}
+        for pos, chunk in enumerate(self._chunks):
+            sid = chunk.section_id
+            if sid:
+                self._section_to_positions.setdefault(sid, []).append(pos)
+
+    def _rebuild_toc_metadata(self) -> None:
+        """Rebuild section_map, toc_trees, and section_to_positions from chunk metadata.
+
+        Called during load (migration guard) and after indexing.
+        """
+        # Rebuild section_map: section_id → list of chunk_ids
+        self._section_map = {}
+        for chunk in self._chunks:
+            sid = chunk.section_id
+            if sid:
+                self._section_map.setdefault(sid, []).append(chunk.id)
+
+        # Rebuild toc_trees: source_path → tree dict
+        self._toc_trees = {}
+        for chunk in self._chunks:
+            src = chunk.source_path
+            if src not in self._toc_trees:
+                # Build a minimal toc tree for this document
+                self._toc_trees[src] = self._build_toc_tree_for_doc(src)
+
+        # Rebuild section_to_positions
+        self._section_to_positions = {}
+        for pos, chunk in enumerate(self._chunks):
+            sid = chunk.section_id
+            if sid:
+                self._section_to_positions.setdefault(sid, []).append(pos)
+
+    def _build_toc_tree_for_doc(self, source_path: str) -> dict:
+        """Build a ToC tree for a single document from its chunks.
+
+        Returns a nested dict:
+        {"title": str, "heading": str, "level": int, "children": [...], "chunk_count": int, "structured": bool}
+        """
+        doc_chunks = [c for c in self._chunks if c.source_path == source_path]
+        if not doc_chunks:
+            return {"title": "", "heading": "", "level": 0, "children": [], "chunk_count": 0, "structured": False}
+
+        # Check if document has structure (any non-empty heading_path)
+        has_structure = any(c.heading_path for c in doc_chunks)
+
+        if not has_structure:
+            # Non-structured document
+            import os
+            filename = os.path.basename(source_path)
+            return {
+                "title": filename,
+                "heading": "",
+                "level": 0,
+                "children": [],
+                "chunk_count": len(doc_chunks),
+                "structured": False,
+            }
+
+        # Build nested tree from heading_paths
+        # Collect all unique heading_paths to determine tree structure
+        title = doc_chunks[0].heading_path[0] if doc_chunks[0].heading_path else os.path.basename(source_path)
+
+        root = {
+            "title": title,
+            "heading": title,
+            "level": 1,
+            "children": [],
+            "chunk_count": len(doc_chunks),
+            "structured": True,
+        }
+
+        # Track nodes by heading_path tuple for nesting
+        nodes_by_path: dict[tuple[str, ...], dict] = {(title,): root}
+
+        for chunk in doc_chunks:
+            hp = chunk.heading_path
+            if not hp:
+                continue
+
+            # Walk down the heading_path, creating nodes as needed
+            current_path: tuple[str, ...] = (hp[0],)
+            current_node = root
+
+            for i, heading in enumerate(hp[1:], start=1):
+                current_path = current_path + (heading,)
+                if current_path not in nodes_by_path:
+                    new_node = {
+                        "title": heading,
+                        "heading": heading,
+                        "level": i + 1,
+                        "children": [],
+                        "chunk_count": 0,
+                        "structured": True,
+                    }
+                    current_node["children"].append(new_node)
+                    nodes_by_path[current_path] = new_node
+                current_node = nodes_by_path[current_path]
+
+            # Increment chunk count for the leaf node
+            current_node["chunk_count"] += 1
+
+        return root
 
     # ---- BM25 methods ----
 
@@ -421,9 +531,28 @@ class CorpusIndex:
                         source_path=c.get("source_path", ""),
                         char_offset=c.get("char_offset", 0),
                         metadata=c.get("metadata", {}),
+                        heading_path=c.get("heading_path", []),  # Migration guard: default [] for old indexes
+                        section_id=c.get("section_id", ""),  # Migration guard: default "" for old indexes
                     )
                     for c in meta
                 ]
+                # Try loading ToC metadata from file, fall back to rebuild
+                toc_meta_path = self.index_dir / "toc_metadata.json"
+                if toc_meta_path.exists():
+                    try:
+                        with open(toc_meta_path, "r") as tf:
+                            toc_meta = json.load(tf)
+                        self._section_map = toc_meta.get("section_map", {})
+                        self._toc_trees = toc_meta.get("toc_trees", {})
+                        self._section_to_positions = toc_meta.get("section_to_positions", {})
+                        # If any are empty but we have chunks, rebuild
+                        if not self._section_map and self._chunks:
+                            self._rebuild_toc_metadata()
+                    except Exception:
+                        self._rebuild_toc_metadata()
+                else:
+                    # Migration: old index without toc_metadata.json -- rebuild from chunks
+                    self._rebuild_toc_metadata()
 
         # Load FAISS index (with backup recovery)
         self._faiss_index = self._load_faiss_with_recovery()
@@ -465,6 +594,15 @@ class CorpusIndex:
 
         # 3. Write file hashes (atomic)
         self._atomic_write_json(self.hashes_path, self._file_hashes)
+
+        # 1c. Write ToC metadata (atomic)
+        toc_meta_path = self.index_dir / "toc_metadata.json"
+        toc_meta = {
+            "section_map": self._section_map,
+            "toc_trees": self._toc_trees,
+            "section_to_positions": self._section_to_positions,
+        }
+        self._atomic_write_json(toc_meta_path, toc_meta)
 
         # 4. Write BM25 index (best-effort)
         self._save_bm25()
@@ -728,6 +866,9 @@ class CorpusIndex:
         # Rebuild stable ID map (positions may have changed)
         self._rebuild_stable_id_map()
 
+        # Rebuild ToC metadata (section_map, toc_trees, section_to_positions)
+        self._rebuild_toc_metadata()
+
         # Build BM25 index from all current chunks (full rebuild — cheap)
         self._build_bm25_index(self._chunks)
 
@@ -802,6 +943,8 @@ class CorpusIndex:
                 "topic": self.corpus.topic,
                 "score": weighted_score,
                 "raw_score": float(score),
+                "heading_path": chunk.heading_path,
+                "section_id": chunk.section_id,
             })
 
             # Stop once we have enough valid results
@@ -834,7 +977,179 @@ class CorpusIndex:
                 "heading": chunk.heading,
                 "corpus": self.corpus.name,
                 "char_count": chunk.char_count,
+                "heading_path": chunk.heading_path,
+                "section_id": chunk.section_id,
             }
+
+    def search_section(self, query_vector: np.ndarray, section_filter: str, top_k: int = 5) -> list[dict]:
+        """
+        Search within a specific section using brute-force cosine similarity.
+
+        Args:
+            query_vector: Pre-embedded query vector (normalized).
+            section_filter: Section ID to search within (or heading_path prefix).
+            top_k: Number of results to return.
+
+        Returns:
+            List of result dicts with chunk data and score.
+        """
+        with self._rwlock.read_lock():
+            self._load()
+            chunks_snapshot = list(self._chunks)
+            section_to_positions = dict(self._section_to_positions)
+
+        # Try direct section_id match first
+        positions = section_to_positions.get(section_filter, [])
+
+        # If no direct match, try heading_path prefix matching
+        if not positions:
+            filter_lower = section_filter.lower()
+            for s_positions in section_to_positions.values():
+                # Check if any chunk in this section has a heading_path that matches
+                for pos in s_positions:
+                    if pos < len(chunks_snapshot):
+                        chunk = chunks_snapshot[pos]
+                        if chunk.heading_path:
+                            # Check if any heading in the path equals the filter,
+                            # or if the joined path starts with the filter
+                            joined = " ".join(chunk.heading_path).lower()
+                            if (filter_lower in [h.lower() for h in chunk.heading_path]
+                                    or joined.startswith(filter_lower)):
+                                positions.extend(s_positions)
+                                break
+
+        if not positions:
+            return []  # Section not found
+
+        # Get vectors for these positions via FAISS reconstruct
+        vectors = []
+        valid_positions = []
+        for pos in positions:
+            if pos < len(chunks_snapshot):
+                vec = np.zeros((1, self.embedder.dimensions), dtype=np.float32)
+                self._faiss_index.reconstruct(pos, vec[0])
+                vectors.append(vec[0])
+                valid_positions.append(pos)
+
+        if not vectors:
+            return []
+
+        vectors_array = np.array(vectors, dtype=np.float32)
+
+        # Brute-force cosine similarity (dot product since L2-normalized)
+        query_2d = query_vector.reshape(1, -1).astype(np.float32)
+        scores = (query_2d @ vectors_array.T)[0]  # shape: (n_positions,)
+
+        # Sort by score descending
+        sorted_indices = np.argsort(-scores)
+
+        results = []
+        for i in sorted_indices[:top_k]:
+            pos = valid_positions[i]
+            chunk = chunks_snapshot[pos]
+
+            if not os.path.exists(chunk.source_path):
+                continue
+
+            weighted_score = float(scores[i]) * self.corpus.weight
+
+            results.append({
+                "chunk_id": f"{self.corpus.name}:{chunk.id}",
+                "summary": chunk.summary,
+                "location": f"{chunk.source_path}#{chunk.heading}".rstrip("#"),
+                "source_path": chunk.source_path,
+                "filename": os.path.basename(chunk.source_path),
+                "corpus": self.corpus.name,
+                "topic": self.corpus.topic,
+                "score": weighted_score,
+                "raw_score": float(scores[i]),
+                "heading_path": chunk.heading_path,
+                "section_id": chunk.section_id,
+            })
+
+            if len(results) >= top_k:
+                break
+
+        return results
+
+    def get_section_chunks(self, section_id: str) -> list[Chunk]:
+        """Get all chunks belonging to a section by section_id.
+
+        Args:
+            section_id: The section identifier.
+
+        Returns:
+            List of Chunk objects in the section, sorted by char_offset.
+        """
+        with self._rwlock.read_lock():
+            self._load()
+            chunks_snapshot = list(self._chunks)
+            section_map = dict(self._section_map)
+
+        chunk_ids = section_map.get(section_id, [])
+        if not chunk_ids:
+            return []
+
+        # Find chunks by ID
+        id_set = set(chunk_ids)
+        section_chunks = [c for c in chunks_snapshot if c.id in id_set]
+        # Sort by char_offset to maintain document order
+        section_chunks.sort(key=lambda c: c.char_offset)
+        return section_chunks
+
+    def get_toc_tree(self, source_path: str | None = None) -> dict:
+        """Get table of contents for this corpus.
+
+        Args:
+            source_path: If specified, return ToC for that document only.
+                         If None, return a list of all documents with their top-level info.
+
+        Returns:
+            ToC tree dict for a single document, or dict with list of all docs.
+        """
+        with self._rwlock.read_lock():
+            self._load()
+            toc_trees = dict(self._toc_trees)
+
+        if source_path:
+            return toc_trees.get(source_path, {
+                "title": os.path.basename(source_path),
+                "heading": "",
+                "level": 0,
+                "children": [],
+                "chunk_count": 0,
+                "structured": False,
+            })
+
+        # Return all documents
+        docs = []
+        for src_path, tree in toc_trees.items():
+            docs.append({
+                "filename": os.path.basename(src_path),
+                "source_path": src_path,
+                "title": tree.get("title", os.path.basename(src_path)),
+                "structured": tree.get("structured", False),
+                "chunk_count": tree.get("chunk_count", 0),
+                "top_level_headings": [
+                    child["heading"] for child in tree.get("children", [])
+                ] if tree.get("structured") else [],
+            })
+
+        return {"documents": docs, "total": len(docs)}
+
+    @property
+    def toc_trees(self) -> dict[str, dict]:
+        """Access to toc trees dict (read-only)."""
+        with self._rwlock.read_lock():
+            self._load()
+            return dict(self._toc_trees)
+
+    @property
+    def section_map(self) -> dict[str, list[str]]:
+        """Access to section map (read-only)."""
+        with self._rwlock.read_lock():
+            self._load()
+            return dict(self._section_map)
 
     def list_documents(self) -> list[dict]:
         """List all indexed documents in this corpus.

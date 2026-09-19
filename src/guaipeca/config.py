@@ -78,7 +78,9 @@ class SearchConfig:
     bm25_weight: float = 1.0     # Weight for BM25 scores in RRF fusion
     dense_weight: float = 1.0   # Weight for dense (FAISS) scores in RRF fusion
     rrf_k: int = 60              # RRF constant (standard value from literature)
-    max_chars: int = 8000       # Threshold for auto return_mode (total result chars)
+    max_chars: int = 8000        # Threshold for auto return_mode (chars)
+    toc_rerank: bool = False     # Enable ToC keyword re-ranking (Phase 5)
+    toc_rerank_weight: float = 0.3  # Weight for ToC re-ranking boost
 
 
 @dataclass
@@ -203,6 +205,8 @@ class GuaipecaConfig:
             dense_weight=srch.get("dense_weight", 1.0),
             rrf_k=srch.get("rrf_k", 60),
             max_chars=srch.get("max_chars", 8000),
+            toc_rerank=srch.get("toc_rerank", False),
+            toc_rerank_weight=srch.get("toc_rerank_weight", 0.3),
         )
 
         config = cls(

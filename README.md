@@ -173,7 +173,12 @@ guaipeca index --force
 Search across indexed corpora. Returns summary + location + score.
 ```
 search(query="HFM data audit", top_k=5, corpora=["epm-docs"], hybrid=true, return_mode="chunks")
+search(query="consolidation", section_mode=true)
+search(query="revenue", section_filter="Financial Statements")
 ```
+
+**section_mode** groups results by document section, returning full section text instead of individual chunks.
+**section_filter** restricts search to a specific section (by section ID or heading path prefix).
 
 **return_mode** controls result granularity:
 - `chunks` (default) — returns individual chunks with summary, location, and score
@@ -222,6 +227,23 @@ Upload a file to a corpus for conversion and indexing. File content must be base
 ```
 upload(corpus="epm-docs", filename="report.pdf", content="<base64>", index=true)
 ```
+
+### get_toc
+Get the table of contents for a corpus or a specific document. Returns a nested tree of headings with chunk counts, or a list of all documents with their top-level headings. Non-structured documents return a `structured: false` flag.
+```
+get_toc(corpus="epm-docs")
+get_toc(corpus="epm-docs", document="/path/to/report.md")
+```
+
+### ToC-Aware Search Features
+
+Guaipeca supports three STAIR-inspired features that leverage document structure:
+
+- **Section mode** (`section_mode=true`): Groups search results by their document section, concatenating all chunks in each section. Useful for retrieving complete sections rather than fragments.
+- **Section filter** (`section_filter="heading text"`): Restricts search to chunks within a specific section. Useful for searching within a chapter or section.
+- **ToC re-ranking** (`search.toc_rerank: true` in config): Boosts results whose heading path contains query terms. Non-structured documents are not re-ranked.
+
+**Non-structured documents** (no heading markers) degrade gracefully: `heading_path` is empty, `section_id` uses `"unstructured:{hash}"`, `get_toc` returns `structured: false`, `section_filter` returns all chunks from that document, and `toc_rerank` skips re-ranking.
 
 ## CLI
 

@@ -81,6 +81,15 @@ TOOLS = [
                     "description": "Threshold for auto return_mode (total result chars). Default: 8000.",
                     "default": 8000,
                 },
+                "section_mode": {
+                    "type": "boolean",
+                    "description": "If true, group results by section and return full section text. Default: false.",
+                    "default": False,
+                },
+                "section_filter": {
+                    "type": "string",
+                    "description": "Restrict search to a specific section ID or heading path prefix. Example: 'Chapter 3'.",
+                },
             },
             "required": ["query"],
         },
@@ -211,6 +220,29 @@ TOOLS = [
                 },
             },
             "required": ["corpus", "filename", "content"],
+        },
+    },
+    {
+        "name": "get_toc",
+        "description": (
+            "Get the table of contents for a corpus or a specific document. "
+            "Returns a nested tree of headings with chunk counts, or a list of "
+            "documents with their top-level headings. Non-structured documents "
+            "return a structured=false flag."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "corpus": {
+                    "type": "string",
+                    "description": "Corpus name to get ToC for.",
+                },
+                "document": {
+                    "type": "string",
+                    "description": "Optional: specific document source path to get ToC for. If omitted, lists all documents.",
+                },
+            },
+            "required": ["corpus"],
         },
     },
 ]
@@ -360,9 +392,12 @@ class GuaipecaMCPServer:
             hybrid = arguments.get("hybrid")
             return_mode = arguments.get("return_mode", "chunks")
             max_chars = arguments.get("max_chars")
+            section_mode = arguments.get("section_mode", False)
+            section_filter = arguments.get("section_filter")
             result = self.searcher.search(
                 query, top_k=top_k, corpora=corpora, hybrid=hybrid,
                 return_mode=return_mode, max_chars=max_chars,
+                section_mode=section_mode, section_filter=section_filter,
             )
             return self._result_to_mcp(result)
 
@@ -409,6 +444,14 @@ class GuaipecaMCPServer:
             do_index = arguments.get("index", self.config.upload.auto_index)
             result = self._handle_upload(corpus, filename, content_b64, do_index)
             if result.get("error"):
+                return self._error_result(result["error"])
+            return self._result_to_mcp(result)
+
+        elif tool_name == "get_toc":
+            corpus = arguments.get("corpus", "")
+            document = arguments.get("document")
+            result = self.searcher.get_toc(corpus=corpus, document=document)
+            if "error" in result:
                 return self._error_result(result["error"])
             return self._result_to_mcp(result)
 

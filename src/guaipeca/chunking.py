@@ -6,6 +6,7 @@ Adapted from a structure-aware chunking strategy:
 - Code-block-aware: fenced code blocks are never split mid-block
 - Configurable overlap between consecutive chunks
 - Pure Python regex, zero LLM calls
+- ToC-aware: heading_path and section_id tracked for each chunk
 """
 
 from __future__ import annotations
@@ -27,11 +28,13 @@ class Chunk:
     source_path: str
     char_offset: int = 0
     metadata: dict = field(default_factory=dict)
+    heading_path: list[str] = field(default_factory=list)
+    section_id: str = ""
 
     @property
     def summary(self) -> str:
         """Summary of the chunk: heading if available, else first 1-2 non-empty lines."""
-        # Prefer the heading as summary — it's the most informative short label
+        # Prefer the heading as summary -- it's the most informative short label
         if self.heading and self.heading.strip():
             return self.heading.strip()[:200]
 
@@ -61,6 +64,8 @@ class Chunk:
             "summary": self.summary,
             "char_count": self.char_count,
             "metadata": self.metadata,
+            "heading_path": self.heading_path,
+            "section_id": self.section_id,
         }
 
 
@@ -80,6 +85,25 @@ CODE_FENCE_PATTERN = re.compile(r"^(`{3,}|~{3,})", re.MULTILINE)
 def _make_chunk_id(source_path: str, heading: str, offset: int) -> str:
     """Generate a stable chunk ID from source path + heading + offset."""
     raw = f"{source_path}:{heading}:{offset}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _make_section_id(source_path: str, heading_path: list[str]) -> str:
+    """Generate a section ID from source path and top-level heading.
+
+    For structured docs: SHA256(source_path + ":" + top_level_heading)[:16]
+    where top_level_heading is the ## heading (heading_path[-1] if heading_path
+    ends with a ## heading, or the first ##-level heading found).
+
+    For non-structured docs (empty heading_path): "unstructured:{hash}" where
+    hash = SHA256(source_path)[:16].
+    """
+    if not heading_path:
+        return f"unstructured:{hashlib.sha256(source_path.encode()).hexdigest()[:16]}"
+
+    # The section heading is the last entry in heading_path (the ## heading)
+    top_heading = heading_path[-1] if heading_path else ""
+    raw = f"{source_path}:{top_heading}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -127,10 +151,13 @@ def chunk_text(
     sections = _split_on_headings(working_text)
 
     chunks = []
-    for heading, section_text, offset in sections:
+    for heading, section_text, offset, heading_path in sections:
         # Restore tables in section
         for key, table_text in tables.items():
             section_text = section_text.replace(key, table_text)
+
+        # Compute section_id for this section
+        section_id = _make_section_id(source_path, heading_path)
 
         # If section is too large, split further by paragraph (with code-block awareness)
         if len(section_text) > max_size:
@@ -138,6 +165,8 @@ def chunk_text(
                 section_text, source_path, max_size,
                 heading=heading, base_offset=offset,
                 overlap=overlap,
+                heading_path=heading_path,
+                section_id=section_id,
             )
             chunks.extend(sub_chunks)
         else:
@@ -148,23 +177,31 @@ def chunk_text(
                 text=section_text.strip(),
                 source_path=source_path,
                 char_offset=offset,
+                heading_path=heading_path,
+                section_id=section_id,
             ))
 
     return chunks
 
 
-def _split_on_headings(text: str) -> list[tuple[str, str, int]]:
+def _split_on_headings(text: str) -> list[tuple[str, str, int, list[str]]]:
     """
     Split text on ## (level 2) headings.
 
-    Returns list of (heading, text, char_offset) tuples.
+    Returns list of (heading, text, char_offset, heading_path) tuples.
     Level 1 (#) is treated as document title, included in first chunk.
     Level 3+ (###, ####) stay with their parent ## section.
+    heading_path is the list of headings from level 1 down to the current section's heading.
     """
     sections = []
     current_heading = ""
     current_text = ""
     current_offset = 0
+
+    # Heading stack: list of (level, heading_text) tuples
+    heading_stack: list[tuple[int, str]] = []
+    # The heading_path for the current section (captured when section starts)
+    current_heading_path: list[str] = []
 
     lines = text.split("\n")
     pos = 0
@@ -177,15 +214,29 @@ def _split_on_headings(text: str) -> list[tuple[str, str, int]]:
 
             # Only split on level 2 headings
             if level == 2:
-                # Save previous section
+                # Save previous section with its captured heading_path
                 if current_text.strip():
-                    sections.append((current_heading, current_text.strip(), current_offset))
+                    sections.append((current_heading, current_text.strip(), current_offset, current_heading_path))
 
+                # Pop stack entries deeper than or equal to current level
+                while heading_stack and heading_stack[-1][0] >= level:
+                    heading_stack.pop()
+                # Push current heading onto stack
+                heading_stack.append((level, heading_text))
+                # Capture heading_path for the new section (full stack)
+                current_heading_path = [h for _, h in heading_stack]
                 current_heading = heading_text
                 current_text = line + "\n"
                 current_offset = pos
             else:
-                # Level 1, 3, 4, etc. — keep with current section
+                # Level 1, 3, 4, etc. -- keep with current section
+                # Update stack for heading tracking
+                while heading_stack and heading_stack[-1][0] >= level:
+                    heading_stack.pop()
+                heading_stack.append((level, heading_text))
+                # Update current heading_path if section hasn't started yet (no ##)
+                # or if we want sub-headings reflected in the path
+                current_heading_path = [h for _, h in heading_stack]
                 current_text += line + "\n"
         else:
             current_text += line + "\n"
@@ -193,11 +244,12 @@ def _split_on_headings(text: str) -> list[tuple[str, str, int]]:
 
     # Don't forget the last section
     if current_text.strip():
-        sections.append((current_heading, current_text.strip(), current_offset))
+        # heading_path = the captured path for this section
+        sections.append((current_heading, current_text.strip(), current_offset, current_heading_path))
 
     # If no sections were created (no ## headings), return entire text as one chunk
     if not sections:
-        sections.append(("", text.strip(), 0))
+        sections.append(("", text.strip(), 0, []))
 
     return sections
 
@@ -269,6 +321,8 @@ def _chunk_by_paragraph(
     heading: str = "",
     base_offset: int = 0,
     overlap: int = 200,
+    heading_path: list[str] | None = None,
+    section_id: str = "",
 ) -> list[Chunk]:
     """
     Split text by paragraph boundaries when sections exceed max_size.
@@ -281,7 +335,14 @@ def _chunk_by_paragraph(
         base_offset: Character offset of this section within the document.
         overlap: Number of characters to carry from the end of the previous chunk
                  into the start of the next chunk.
+        heading_path: Heading path for this section (inherited by sub-chunks).
+        section_id: Section ID for this section (inherited by sub-chunks).
     """
+    if heading_path is None:
+        heading_path = []
+    if not section_id:
+        section_id = _make_section_id(source_path, heading_path)
+
     paragraphs = _split_paragraphs_aware(text, max_size)
     chunks = []
     current_text = ""
@@ -308,6 +369,8 @@ def _chunk_by_paragraph(
                     text=current_text.strip(),
                     source_path=source_path,
                     char_offset=offset,
+                    heading_path=heading_path,
+                    section_id=section_id,
                 ))
                 # P2-4: Extract overlap only from the original (non-overlap) content
                 # to prevent compounding of overlap across multiple splits
@@ -335,6 +398,8 @@ def _chunk_by_paragraph(
             text=current_text.strip(),
             source_path=source_path,
             char_offset=offset,
+            heading_path=heading_path,
+            section_id=section_id,
         ))
 
     return chunks

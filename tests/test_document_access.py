@@ -595,4 +595,4 @@ class TestMCPToolDefinitions:
     def test_tool_count(self):
         """Should now have 8 tools (6 original + 2 new)."""
         from guaipeca.mcp_server import TOOLS
-        assert len(TOOLS) == 8, f"Expected 8 tools, got {len(TOOLS)}: {[t['name'] for t in TOOLS]}"
+        assert len(TOOLS) == 9, f"Expected 9 tools, got {len(TOOLS)}: {[t['name'] for t in TOOLS]}"
