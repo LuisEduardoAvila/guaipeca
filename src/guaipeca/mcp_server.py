@@ -245,6 +245,33 @@ TOOLS = [
             "required": ["corpus"],
         },
     },
+    {
+        "name": "delete",
+        "description": (
+            "Delete a file from a corpus that accepts uploads. "
+            "Only corpora configured in upload.allow can have files deleted. "
+            "The corpus is re-indexed after deletion to remove stale chunks."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "corpus": {
+                    "type": "string",
+                    "description": "Target corpus name (must be in upload.allow list).",
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Filename including extension (e.g. 'report.pdf').",
+                },
+                "index": {
+                    "type": "boolean",
+                    "description": "If true (default), re-index the corpus after deletion.",
+                    "default": True,
+                },
+            },
+            "required": ["corpus", "filename"],
+        },
+    },
 ]
 
 
@@ -455,6 +482,15 @@ class GuaipecaMCPServer:
                 return self._error_result(result["error"])
             return self._result_to_mcp(result)
 
+        elif tool_name == "delete":
+            corpus = arguments.get("corpus", "")
+            filename = arguments.get("filename", "")
+            do_index = arguments.get("index", self.config.upload.auto_index)
+            result = self._handle_delete(corpus, filename, do_index)
+            if result.get("error"):
+                return self._error_result(result["error"])
+            return self._result_to_mcp(result)
+
         else:
             return self._error_result(f"Unknown tool: {tool_name}")
 
@@ -580,6 +616,68 @@ class GuaipecaMCPServer:
         }
 
         # Optionally index the corpus
+        if do_index:
+            index_result = self.searcher.index_corpus(corpus_name=corpus_name)
+            result["index"] = index_result
+            result["indexed"] = True
+        else:
+            result["indexed"] = False
+
+        return result
+
+    def _handle_delete(
+        self, corpus_name: str, filename: str, do_index: bool
+    ) -> dict:
+        """Handle a file deletion from a corpus.
+
+        Validates the corpus is upload-enabled, checks the file exists,
+        deletes it, and optionally triggers re-indexing.
+        """
+        if corpus_name not in self.config.upload.allow:
+            return {"error": f"Corpus '{corpus_name}' does not accept uploads (delete not allowed)"}
+
+        corpus = self.config.get_corpus(corpus_name)
+        if corpus is None:
+            return {"error": f"Corpus not found: {corpus_name}"}
+
+        filename = os.path.basename(filename)
+        if not filename:
+            return {"error": "Invalid filename"}
+
+        corpus_path = Path(corpus.path)
+        file_path = corpus_path / filename
+
+        try:
+            real_path = file_path.resolve()
+            real_corpus = corpus_path.resolve()
+            if not str(real_path).startswith(str(real_corpus)):
+                return {"error": "Invalid filename (path traversal detected)"}
+        except Exception:
+            return {"error": "Invalid filename"}
+
+        if not file_path.exists():
+            return {"error": f"File not found: {filename}"}
+
+        if not file_path.is_file():
+            return {"error": f"Not a file: {filename}"}
+
+        try:
+            file_size = file_path.stat().st_size
+            os.unlink(str(file_path))
+        except OSError as e:
+            logger.error(f"Failed to delete {file_path}: {e}")
+            return {"error": f"Failed to delete file: {filename}"}
+
+        logger.info(f"Deleted {filename} from corpus '{corpus_name}' ({file_size} bytes)")
+
+        result = {
+            "corpus": corpus_name,
+            "filename": filename,
+            "path": str(file_path),
+            "size_bytes": file_size,
+            "deleted": True,
+        }
+
         if do_index:
             index_result = self.searcher.index_corpus(corpus_name=corpus_name)
             result["index"] = index_result
@@ -887,11 +985,38 @@ class GuaipecaMCPServer:
                 # Unknown POST path
                 self._send_json(404, {"error": "not found"})
 
+            def do_DELETE(self):
+                """Handle DELETE requests (file deletion)."""
+                parsed = urllib.parse.urlparse(self.path)
+                query_params = urllib.parse.parse_qs(parsed.query)
+
+                # DELETE /documents?corpus=<name>&filename=<name>
+                if parsed.path == "/documents":
+                    if not self._check_auth():
+                        self._send_json(401, {"error": "unauthorized"})
+                        return
+
+                    corpus_name = query_params.get("corpus", [None])[0]
+                    filename = query_params.get("filename", [None])[0]
+
+                    if not corpus_name or not filename:
+                        self._send_json(400, {"error": "corpus and filename required"})
+                        return
+
+                    result = server_instance._handle_delete(corpus_name, filename, do_index=True)
+                    if result.get("error"):
+                        self._send_json(400, result)
+                    else:
+                        self._send_json(200, result)
+                    return
+
+                self._send_json(404, {"error": "not found"})
+
             def do_OPTIONS(self):
                 """Handle CORS preflight requests."""
                 self.send_response(204)
                 self.send_header("Access-Control-Allow-Origin", cors_origin)
-                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
                 self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
                 self.end_headers()
 
