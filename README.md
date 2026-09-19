@@ -22,7 +22,7 @@ Proven on a Raspberry Pi 5 (8GB RAM, ARM64) alongside other services. If it runs
 ## Features
 
 - **Multi-corpus** — define multiple document folders, each with its own weight and topic label
-- **MCP-native** — exposes `search`, `get_chunk`, `get_document`, `list_documents`, `index`, `status`, `list_folders`, and `upload` tools via MCP
+- **MCP-native** — exposes `search`, `get_chunk`, `get_document`, `list_documents`, `index`, `status`, `list_folders`, `upload`, `delete`, and `get_toc` tools via MCP
 - **Dual transport** — stdio (for local LLM integration) + HTTP (for remote/network access)
 - **Hybrid search** — optional BM25 sparse keyword search fused with FAISS dense vectors via Reciprocal Rank Fusion (RRF)
 - **Any document format** — pymupdf (PDFs with font-based heading detection) + markitdown (DOCX, PPTX, XLSX, HTML → markdown)
@@ -246,6 +246,12 @@ Get the table of contents for a corpus or a specific document. Returns a nested 
 ```
 get_toc(corpus="epm-docs")
 get_toc(corpus="epm-docs", document="/path/to/report.md")
+```
+
+### delete
+Delete a file from a corpus that accepts uploads. Only corpora listed in `upload.allow` can have files deleted. The corpus is re-indexed after deletion to remove stale chunks.
+```
+delete(corpus="epm-docs", filename="report.pdf", index=true)
 ```
 
 ### ToC-Aware Search Features
@@ -500,6 +506,7 @@ See `docs/container-deployment.md` for detailed VM deployment instructions.
   - `GET /health` — health check
   - `GET /tools` — list available tools
   - `GET /download/{corpus}/{filename}` — download original file (requires auth, path traversal protected)
+  - `DELETE /documents?corpus=<name>&filename=<name>` — delete a file from an upload-enabled corpus (requires auth)
 - **Error messages:** Client error responses are sanitized to avoid leaking
   internal file paths or library details.
 
