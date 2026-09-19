@@ -1,12 +1,16 @@
 """MCP server for Guaipeca.
 
-Exposes six tools via Model Context Protocol:
+Exposes ten tools via Model Context Protocol:
 - search: semantic search across corpora (returns summary + location)
 - get_chunk: retrieve full chunk text by chunk_id
+- get_document: retrieve full document text by corpus and source_path
+- list_documents: list all indexed documents in a corpus
 - index: trigger indexing for a corpus or all
 - status: get corpus statistics
 - list_folders: list corpora that accept file uploads
 - upload: upload a file to a corpus for conversion and indexing
+- delete: delete a file from an upload-enabled corpus
+- get_toc: get table of contents for a corpus or document
 
 Transports:
 - stdio: newline-delimited JSON-RPC over stdin/stdout
@@ -26,6 +30,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .config import GuaipecaConfig
 from .converter import Converter
 from .embedding import EmbeddingService
@@ -391,7 +396,7 @@ class GuaipecaMCPServer:
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {
                     "name": "guaipeca",
-                    "version": "0.1.0",
+                    "version": __version__,
                 },
             }
 
@@ -864,7 +869,7 @@ class GuaipecaMCPServer:
 
                 # Health check
                 if parsed.path == "/health":
-                    self._send_json(200, {"status": "ok", "server": "guaipeca", "version": "0.1.0"})
+                    self._send_json(200, {"status": "ok", "server": "guaipeca", "version": __version__})
                     return
 
                 # Tools listing (convenience endpoint)
