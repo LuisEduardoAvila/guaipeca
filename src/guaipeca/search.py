@@ -473,9 +473,15 @@ class Searcher:
                         if pos is not None and pos < len(corpus_idx._chunks):
                             chunk = corpus_idx._chunks[pos]
                             if chunk.heading_path:
-                                # Check if the filter matches as a prefix of the joined heading_path
+                                # Fuzzy match: check if filter is a substring of any heading in the path,
+                                # or if the filter matches as a prefix of the joined heading_path.
+                                # This handles headings with emojis, annotations, or extra text.
                                 joined = " ".join(chunk.heading_path)
-                                if joined.lower().startswith(section_filter.lower()):
+                                filter_lower = section_filter.lower()
+                                joined_lower = joined.lower()
+                                if (joined_lower.startswith(filter_lower)
+                                        or filter_lower in joined_lower
+                                        or any(filter_lower in h.lower() for h in chunk.heading_path)):
                                     section_chunk_ids.update(cids)
                                     section_found = True
                                     break
