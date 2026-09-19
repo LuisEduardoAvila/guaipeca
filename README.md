@@ -1,10 +1,23 @@
 # Guaipeca 🧠
 
-**Lightweight configurable RAG MCP server — FAISS + fastembed + markitdown**
+**Self-hosted RAG MCP server that runs where others can't**
 
 > **Why "Guaipeca"?** — _Guaipeca_ is southern Brazilian slang (Tupi-Guarani origin) for a scrappy mutt — a _cusco_, no pedigree, no frills, but loyal and gets the job done. Seemed fitting for a lightweight RAG server with no API keys, no GPU, and no cloud dependencies.
 
 Guaipeca is a self-hosted retrieval-augmented generation (RAG) server that exposes semantic search over your document corpora via the Model Context Protocol (MCP). It uses a lightweight tech stack — FAISS indexes, fastembed (ONNX Runtime) embeddings, structure-aware chunking — and is fully configurable and decoupled from any specific memory system.
+
+## Why Guaipeca?
+
+Most RAG solutions assume you have a GPU, a cloud budget, or at least a beefy server. Guaipeca doesn't.
+
+- **No API keys** — runs entirely locally, no OpenAI/Anthropic/Google calls
+- **No GPU** — ONNX Runtime on CPU, works on ARM64, x86_64, anything Linux
+- **No cloud** — your documents never leave your machine
+- **No torch** — fastembed (~46MB) instead of sentence-transformers (~959MB)
+- **Under 500MB total** — embedding model + FAISS index + dependencies
+- **Deploy in minutes** — `pip install`, one YAML config, `guaipeca serve`
+
+Proven on a Raspberry Pi 5 (8GB RAM, ARM64) alongside other services. If it runs there, it runs anywhere.
 
 ## Features
 
@@ -20,7 +33,7 @@ Guaipeca is a self-hosted retrieval-augmented generation (RAG) server that expos
 - **Embedding cache (LRU + TTL)** — 10K-entry LRU cache with 1hr TTL, memory-pressure aware eviction via psutil
 - **Content preprocessing** — heading + first 500 chars sent to embedder for better semantic signal; full text stored in metadata
 - **Concurrent** — read-write lock allows multiple simultaneous searches, exclusive indexing
-- **Runs on Pi 5** — ARM64, CPU-only, ~90MB model + ~20MB FAISS
+- **Runs anywhere** — ARM64 (Pi 5, ARM servers), x86_64 (laptops, VMs, dedicated servers), any Linux box with Python 3.12+. Proven on Pi 5 with ~90MB model + ~20MB FAISS
 - **Optional auth** — Bearer token authentication for HTTP transport
 
 ## Quick Start
@@ -111,14 +124,14 @@ Guaipeca uses [FastEmbed](https://github.com/qdrant/fastembed) (ONNX Runtime) fo
 
 Pick based on your use case and hardware:
 
-#### Speed-optimized (384-dim, <100MB) — Pi 5, resource-constrained
+#### Ultra-light (384-dim, <100MB) — edge devices, SBCs, 2GB RAM
 | Model | Dimensions | Size | Best for |
 |-------|-----------|------|----------|
 | `all-MiniLM-L6-v2` | 384 | 90MB | General use, fast (default) |
 | `BAAI/bge-small-en-v1.5` | 384 | 67MB | Better quality, same speed |
 | `snowflake/arctic-embed-xs` | 384 | 90MB | General use, compact |
 
-#### Balanced (512–768 dim, 120–520MB) — desktop, small VM
+#### Balanced (512–768 dim, 120–520MB) — desktops, small VMs, laptops
 | Model | Dimensions | Size | Best for |
 |-------|-----------|------|----------|
 | `jinaai/jina-embeddings-v2-small-en` | 512 | 120MB | Long documents (8192 tokens) |
@@ -126,7 +139,7 @@ Pick based on your use case and hardware:
 | `nomic-ai/nomic-embed-text-v1.5-Q` | 768 | 130MB | Quantized, good balance |
 | `snowflake/arctic-embed-s` | 384 | 130MB | Good quality, compact |
 
-#### Quality-optimized (768–1024 dim, 420MB+) — server, dedicated hardware
+#### Quality-optimized (768–1024 dim, 420MB+) — dedicated servers, workstations
 | Model | Dimensions | Size | Best for |
 |-------|-----------|------|----------|
 | `BAAI/bge-large-en-v1.5` | 1024 | 1.2GB | Best quality, slowest |
@@ -160,9 +173,9 @@ guaipeca index --force
 
 | Use case | Recommended model | Why |
 |----------|-------------------|-----|
-| **Pi 5 / ARM64 SBC** | `all-MiniLM-L6-v2` | Fast, 90MB, good enough quality |
-| **Small VM (2GB RAM)** | `BAAI/bge-small-en-v1.5` | Better quality, still 384-dim |
-| **Dedicated server** | `BAAI/bge-base-en-v1.5` | 768-dim, noticeable quality gain |
+| **Edge / SBC (Pi 5, ARM64, 2GB RAM)** | `all-MiniLM-L6-v2` | Fast, 90MB, good enough quality |
+| **Small VM / laptop (4GB RAM)** | `BAAI/bge-small-en-v1.5` | Better quality, still 384-dim |
+| **Dedicated server / workstation** | `BAAI/bge-base-en-v1.5` | 768-dim, noticeable quality gain |
 | **Long documents** | `jinaai/jina-embeddings-v2-base-en` | 8192 token context |
 | **Multilingual** | `paraphrase-multilingual-MiniLM-L12-v2` | 50+ languages, 384-dim |
 | **Code search** | `jinaai/jina-embeddings-v2-base-code` | Code + docs, 30+ languages |
@@ -258,7 +271,7 @@ guaipeca serve [--transport both] [--port 8090]  # Start MCP server
 
 ## Running as a systemd Service
 
-For always-on deployment on Linux (e.g. Pi 5), install Guaipeca as a systemd service.
+For always-on deployment on any Linux system (Pi 5, VM, laptop, server), install Guaipeca as a systemd service.
 
 ### 1. Create the service file
 
@@ -328,7 +341,7 @@ sudo systemctl disable guaipeca    # stop starting on boot
 
 - The service runs `guaipeca serve` with `--transport both` (stdio + HTTP/SSE)
 - Port 8090 is bound to `127.0.0.1` by default (config `server.host`). Use `0.0.0.0` for network access
-- Resource limits (`MemoryMax`, `CPUQuota`) prevent Guaipeca from starving other services on resource-constrained hosts like Pi 5
+- Resource limits (`MemoryMax`, `CPUQuota`) prevent Guaipeca from starving other services on shared or low-resource hosts
 - The embedding model loads at startup (~1s with fastembed/ONNX). First search/index may take slightly longer if the model needs to download
 - Config changes require a restart: `sudo systemctl restart guaipeca`
 - Re-index after adding files: `guaipeca --config ~/.guaipeca/guaipeca.yaml index`
@@ -392,9 +405,9 @@ Indexer     Searcher     MCP Server
 | pyyaml | Config parsing | <1MB |
 | numpy | Array operations | ~15MB |
 
-## ARM64 / Pi 5 System Dependencies
+## ARM64 / Low-Resource System Dependencies
 
-markitdown relies on libraries that require system-level packages on ARM64 (Pi 5).
+markitdown relies on libraries that require system-level packages on ARM64 and some minimal Linux installations.
 Install these before `pip install`:
 
 ```bash
@@ -417,7 +430,7 @@ sudo apt install build-essential python3-dev
 
 ## Container Deployment (Docker)
 
-Guaipeca can run in a Docker container for VM deployment (ARM64 or x86_64). The Pi 5 stays bare-metal; containers are for VMs.
+Guaipeca ships with a Docker container for easy deployment on any platform (ARM64 or x86_64). Run it on a VM, a cloud instance, or alongside other containers — the image is multi-arch and ~643MB before model download.
 
 ### Quick Start
 
