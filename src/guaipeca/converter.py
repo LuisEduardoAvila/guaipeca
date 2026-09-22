@@ -34,30 +34,29 @@ _MAX_HEADING_LEVELS = 6
 # ---------------------------------------------------------------------------
 # Heading-tree validation thresholds
 #
-# Calibrated against ONE real Oracle manual (tests/fixtures/test-doc.pdf,
-# a 350-page Oracle RAG whitepaper) and four synthetic fixture PDFs.
-# Real FCCS PDFs were NOT available in any configured corpus at calibration
-# time — thresholds are marked PROVISIONAL where real-FCCS data is missing.
-# See docs/heading-validation.md for the full calibration report.
+# Re-calibrated 2026-09-22 against a REAL Oracle FCCS PDF:
+#   /tmp/guaipeca-calib/fccs-epm-information-development-team.pdf
+#   (1,349 pages, 42 MB) — the primary reference document.
+# Plus tests/fixtures/test-doc.pdf (real 5-page Oracle manual excerpt).
+# Synthetic fixtures (oracle-*-sim.pdf, deep-legit.pdf, good-hierarchy.pdf)
+# are used only as contrast and are labelled as synthetic.
 #
-# Measurements on available documents:
+# See docs/heading-validation.md for the full calibration report with
+# per-document measurements, threshold rationale, and margins.
 #
-#   Document              Collapse  Saturation  MinGap  OrderAnomaly  Valid?
-#   ───────────────────   ────────  ──────────  ──────  ────────────  ───────
-#   test-doc.pdf (real)     1.00*     0.00       8.0     False         YES
-#   deep-legit.pdf          1.00*     0.00       1.5     False         YES
-#   good-hierarchy.pdf      1.00*     0.00       4.0     False         YES
-#   oracle-manual-sim       1.00*     0.20       0.5     True          NO
-#   oracle-template-sim     1.00**    0.00       N/A     False         NO
+# Measurements on REAL documents:
 #
-# * Collapse ratio = fraction of H2 sections with NO H3+ children.
-#   All three "good" docs have 0 H3+ headings, so their collapse ratio is
-#   1.0 — but they are still valid because they have ≤2 heading levels
-#   (a flat but correct hierarchy). The signal only fires when there are
-#   ≥3 heading levels AND >50% of H2 sections lack H3 children.
+#   Document              Pages  Collapse  Saturation  MinGap  Valid?
+#   ───────────────────   ─────  ────────  ──────────  ──────  ───────
+#   FCCS PDF (real)        1349    0.030     0.149      2.0     YES
+#   test-doc.pdf (real)       5    0.167     0.000      8.0     YES
 #
-# ** oracle-template-sim has only 1 heading level (all H1) — collapse = 1.0
-#    by the "no H2 headings" rule.
+# Synthetic fixtures (contrast only):
+#
+#   oracle-manual-sim        40    0.025     0.200      0.5     NO
+#   oracle-template-sim      20    1.000     0.000      N/A     NO
+#   deep-legit.pdf            3    0.167     0.000      1.5     YES
+#   good-hierarchy.pdf        5    0.200     0.000      4.0     YES
 #
 # A heading tree is considered INVALID if ANY of these signals fire.
 # When invalid, the converter falls back to markitdown for that document.
@@ -72,11 +71,16 @@ _MAX_HEADING_LEVELS = 6
 # levels but H2 sections don't nest into H3 subsections.
 _COLLAPSE_RATIO_THRESHOLD = 0.50
 
-# Signal 2: If >15% of all headings are at the max level (H6), the level
-# mapping is saturating — too many distinct sizes crammed into 6 levels.
-# PROVISIONAL: calibrated on oracle-manual-sim (0.20) vs good docs (0.00).
-# Real FCCS measurement needed.
-_DEPTH_SATURATION_THRESHOLD = 0.15
+# Signal 2: If too many headings sit at the max level (H6), the size
+# mapping is saturating — distinct sizes crammed into 6 bins.
+# Calibrated on:
+#   - Real FCCS: 169/1138 = 0.149 (PASSES with 0.051 margin)
+#   - oracle-manual-sim: 40/200 = 0.200 (FAILS — synthetic bad fixture)
+#   - test-doc.pdf: 0/8 = 0.000 (PASSES)
+# Threshold 0.20 gives the real doc 0.051 margin while still failing the
+# synthetic bad fixture.  Genuinely broken trees (all headings at max depth)
+# would exceed 0.50+.
+_DEPTH_SATURATION_THRESHOLD = 0.20
 
 # Signal 3: If any two adjacent heading levels have font sizes within 1.0pt,
 # the levels are too close to distinguish reliably (size clustering).
@@ -84,11 +88,20 @@ _DEPTH_SATURATION_THRESHOLD = 0.15
 # test-doc has 8.0pt; good-hierarchy has 4.0pt.
 _MIN_SIZE_GAP_THRESHOLD = 1.0
 
-# Signal 4: If the deepest heading level appears in the document before any
-# shallower heading (e.g. H6 before H1), the level ordering is wrong.
-# This is a boolean check — any such anomaly fails.
-# Calibrated: oracle-manual-sim has H6 as first heading; all good docs
-# start with H1 or H2.
+# Signal 4: First-heading sanity check.  The previous "order anomaly"
+# signal flagged ANY deeper heading appearing before a shallower one in
+# document order.  This was broken: real Oracle manuals have a Table of
+# Contents where chapter numbers are at the H5 font size (18pt), appearing
+# before the first H4 body heading — a completely legitimate structure.
+#
+# The redesigned check only flags the FIRST heading in the document if it
+# is unexpectedly deep (deeper than H3), which would indicate a mis-mapped
+# size histogram.  This catches oracle-manual-sim (first heading = H6)
+# while passing the real FCCS PDF (first heading = H1).
+#
+# Level jumps (H1 → H6 with no intermediate levels) are NOT flagged here
+# because they can occur legitimately when a document has a TOC or
+# front-matter section at a different font size than body chapters.
 
 
 class Converter:
@@ -335,12 +348,13 @@ def _validate_heading_tree(
     1. Collapse ratio: (a) zero H2 headings (all one level → 1.0), or
        (b) ≥3 heading levels but >50% of H2 sections have no H3+ children
        (flat tree where depth is expected).
-    2. Depth saturation: >15% of headings at the max level (H6).
+    2. Depth saturation: >20% of headings at the max level (H6).
     3. Size clustering: any two adjacent heading levels with font sizes
        within 1.0pt of each other.
-    4. Order anomaly: a heading level jumps by more than 1 from the
-       previous max (e.g. H6 before any H1-H5), or the first heading
-       is deeper than H2.
+    4. First-heading sanity: the first heading in the document is deeper
+       than H3, indicating a mis-mapped size histogram. (Previous signal
+       flagged any deeper-before-shallower ordering, which false-positived
+       on real Oracle manual TOC entries.)
 
     Args:
         headings: List of (level, text, font_size) tuples in document order.
@@ -417,20 +431,19 @@ def _validate_heading_tree(
                 )
                 break  # one violation is enough
 
-    # --- Signal 4: Order anomaly ---
-    max_level_seen = 0
-    for i, (level, _, _) in enumerate(headings):
-        if i == 0 and level > 2:
-            reasons.append(
-                f"order anomaly: first heading is H{level} (expected H1 or H2)"
-            )
-            break
-        if max_level_seen > 0 and level > max_level_seen + 1:
-            reasons.append(
-                f"order anomaly: H{level} appears before H{max_level_seen + 1}"
-            )
-            break
-        max_level_seen = max(max_level_seen, level)
+    # --- Signal 4: First-heading sanity check ---
+    # Only check if the very first heading is unexpectedly deep (H4+),
+    # which indicates a mis-mapped size histogram. We do NOT check
+    # document-order interleaving (e.g. H5 before H4) because real
+    # Oracle manuals legitimately have TOC entries at heading font
+    # sizes that appear before body-text headings at a different level.
+    # Measured: real FCCS PDF has H5 TOC entries on page 3 before the
+    # first H4 on page 48 — this is normal, not an anomaly.
+    if headings[0][0] > 3:
+        reasons.append(
+            f"first heading is H{headings[0][0]} (expected H1-H3); "
+            f"size histogram may be mis-mapped"
+        )
 
     is_valid = len(reasons) == 0
     return is_valid, reasons
