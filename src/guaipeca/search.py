@@ -37,6 +37,13 @@ class Searcher:
         """
         self.config = config
         self.embedder = embedding_service
+        # Document converter for reading non-text sources (PDF, DOCX, ...).
+        # Falls back to a default Converter so document reading works even
+        # when the caller did not supply one.
+        if converter is None:
+            from .converter import Converter
+            converter = Converter()
+        self.converter = converter
 
         # Build corpus indexes
         self.corpora: dict[str, CorpusIndex] = {}
@@ -361,11 +368,8 @@ class Searcher:
         # Read full document text for each
         doc_results = []
         for source_path, info in docs.items():
-            try:
-                with open(source_path, "r", encoding="utf-8") as f:
-                    text = f.read()
-            except (OSError, UnicodeDecodeError) as e:
-                logger.warning(f"Could not read document {source_path}: {e}")
+            text = self._read_document_text(source_path)
+            if text is None:
                 continue
 
             doc_results.append({
@@ -382,6 +386,30 @@ class Searcher:
         # Sort by score descending
         doc_results.sort(key=lambda r: r["score"], reverse=True)
         return doc_results
+
+    def _read_document_text(self, source_path: str) -> str | None:
+        """Read a source document's full text, converting non-text formats.
+
+        Plain-text formats (.md/.txt/.markdown) are read directly. All other
+        supported formats (PDF, DOCX, PPTX, XLSX, HTML, ...) are routed through
+        the converter so they are returned as markdown text rather than being
+        mis-decoded as UTF-8 (which would drop the whole document).
+
+        Returns:
+            Document text, or None if it could not be read/converted.
+        """
+        ext = os.path.splitext(source_path)[1].lower()
+        try:
+            if ext in (".md", ".txt", ".markdown"):
+                with open(source_path, "r", encoding="utf-8") as f:
+                    return f.read()
+            return self.converter.convert(source_path)
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning(f"Could not read document {source_path}: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Could not convert document {source_path}: {e}")
+            return None
 
     def _dedup_by_section(self, results: list[dict]) -> list[dict]:
         """Collapse results sharing a section_id, keeping the best-scoring chunk per section.

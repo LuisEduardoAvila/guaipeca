@@ -146,14 +146,24 @@ class TestDocumentsMode:
                 f"matched_chunks {doc['matched_chunks']} != expected {expected_count}"
 
     def test_documents_mode_file_text_matches_disk(self, indexed_corpus):
-        """Document text should match the file content on disk."""
+        """Document text should match the file content on disk.
+
+        Plain-text sources (.md/.txt/.markdown) are returned verbatim, so the
+        returned text must equal the on-disk bytes. Converted formats (PDF,
+        DOCX, ...) are returned as converted markdown, so byte-equality does
+        not apply -- assert only that non-empty text was produced.
+        """
         searcher = indexed_corpus
         result = searcher.search("embedding", top_k=10, return_mode="documents")
+        assert result["total"] > 0
         for r in result["results"]:
-            with open(r["source_path"], "r", encoding="utf-8") as f:
-                disk_text = f.read()
-            assert r["text"] == disk_text, \
-                f"Document text doesn't match file on disk: {r['source_path']}"
+            ext = os.path.splitext(r["source_path"])[1].lower()
+            assert r["text"], f"Empty document text for {r['source_path']}"
+            if ext in (".md", ".txt", ".markdown"):
+                with open(r["source_path"], "r", encoding="utf-8") as f:
+                    disk_text = f.read()
+                assert r["text"] == disk_text, \
+                    f"Document text doesn't match file on disk: {r['source_path']}"
 
 
 # ===========================================================================
