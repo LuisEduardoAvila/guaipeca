@@ -328,7 +328,7 @@ sudo systemctl start guaipeca    # start now
 ```bash
 systemctl status guaipeca
 curl http://127.0.0.1:8090/health
-# → {"status": "ok", "server": "guaipeca", "version": "0.3.1"}
+# → {"status": "ok", "server": "guaipeca", "version": "0.3.3"}
 ```
 
 ### 4. Check logs
