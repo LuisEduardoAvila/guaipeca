@@ -59,6 +59,7 @@ class Searcher:
         max_chars: int | None = None,
         section_mode: bool = False,
         section_filter: str | None = None,
+        dedup_sections: bool = False,
     ) -> dict:
         """
         Search across corpora.
@@ -72,6 +73,9 @@ class Searcher:
             max_chars: Threshold for auto mode. None = use config default (search.max_chars).
             section_mode: If True, group results by section and return full section text.
             section_filter: If specified, restrict search to chunks within the given section.
+            dedup_sections: If True, collapse results sharing a section_id, keeping only
+                the best-scoring chunk per section. Improves diversity by preventing
+                near-duplicate chunks from the same section crowding the results.
 
         Returns:
             Dict with results, total, query, return_mode.
@@ -168,6 +172,10 @@ class Searcher:
         if getattr(self.config.search, 'toc_rerank', False):
             all_results = self._rerank_by_toc(all_results, query)
             all_results.sort(key=lambda r: r["score"], reverse=True)
+
+        # Apply section de-duplication if requested
+        if dedup_sections:
+            all_results = self._dedup_by_section(all_results)
 
         # Trim to top_k
         final = all_results[:top_k]
@@ -374,6 +382,36 @@ class Searcher:
         # Sort by score descending
         doc_results.sort(key=lambda r: r["score"], reverse=True)
         return doc_results
+
+    def _dedup_by_section(self, results: list[dict]) -> list[dict]:
+        """Collapse results sharing a section_id, keeping the best-scoring chunk per section.
+
+        This improves result diversity by preventing multiple chunks from the
+        same document section from crowding the top results. The best-scoring
+        chunk from each section is kept; others are dropped.
+
+        Results without a section_id (non-structured docs) are kept as-is.
+
+        Args:
+            results: Sorted list of chunk result dicts (descending by score).
+
+        Returns:
+            Filtered list with at most one chunk per section_id.
+        """
+        seen_sections: set[str] = set()
+        deduped: list[dict] = []
+
+        for r in results:
+            sid = r.get("section_id", "")
+            if not sid or sid.startswith("unstructured:"):
+                # No section_id or unstructured doc — keep as-is (no dedup)
+                deduped.append(r)
+                continue
+            if sid not in seen_sections:
+                seen_sections.add(sid)
+                deduped.append(r)
+
+        return deduped
 
     def _estimate_chunks_size(self, chunk_results: list[dict]) -> int:
         """Estimate total character count of chunk result texts.

@@ -192,6 +192,7 @@ search(query="revenue", section_filter="Financial Statements")
 
 **section_mode** groups results by document section, returning full section text instead of individual chunks.
 **section_filter** restricts search to a specific section (by section ID or heading path prefix).
+**dedup_sections** (optional, `dedup_sections=true`) collapses results sharing a `section_id`, keeping only the best-scoring chunk per section. This improves diversity by preventing near-duplicate chunks from the same section crowding results. Default: `false`.
 
 **return_mode** controls result granularity:
 - `chunks` (default) — returns individual chunks with summary, location, and score
