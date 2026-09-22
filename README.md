@@ -25,7 +25,7 @@ Proven on a Raspberry Pi 5 (8GB RAM, ARM64) alongside other services. If it runs
 - **MCP-native** — exposes `search`, `get_chunk`, `get_document`, `list_documents`, `index`, `status`, `list_folders`, `upload`, `delete`, and `get_toc` tools via MCP
 - **Dual transport** — stdio (for local LLM integration) + HTTP (for remote/network access)
 - **Hybrid search** — optional BM25 sparse keyword search fused with FAISS dense vectors via Reciprocal Rank Fusion (RRF)
-- **Any document format** — pymupdf (PDFs with font-based heading detection) + markitdown (DOCX, PPTX, XLSX, HTML → markdown)
+- **Any document format** — pymupdf (PDFs with font-based heading detection + line-wrap stitching) + markitdown (DOCX, PPTX, XLSX, HTML → markdown)
 - **Structure-aware chunking** — splits on headings, treats tables as atomic units, zero LLM calls
 - **Local embeddings** — fastembed (ONNX Runtime) on CPU, no GPU or API keys needed
 - **Incremental indexing** — SHA256 file hashing, only re-indexes changed files

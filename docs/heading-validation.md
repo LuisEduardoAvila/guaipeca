@@ -263,3 +263,129 @@ just with markitdown's simpler heading structure.
    assumed. If a future real document has saturation > 0.60, the threshold
    may need further adjustment or the signal may need to be removed
    entirely in favor of a combined check (e.g. saturation + clustering).
+## Heading Line-Wrap Stitching (v0.3.2)
+
+### The Defect
+
+Oracle FCCS PDFs wrap long titles across 2+ physical lines. The converter's
+Phase 2 emitted each *physical* pymupdf line independently, producing:
+
+1. **Truncated headings** — the heading text ends mid-phrase (e.g.
+   `#### Configuring Detailed Analysis in Financial Consolidation and`)
+2. **Stray continuation fragments** — the wrapped remainder (e.g. `Close`)
+   emitted as its own bogus heading or orphaned into body text
+
+A truncated heading produces a wrong `heading_path` / `section_id`, which
+poisons `section_mode`, `section_filter`, and `get_toc` in chunking.py.
+
+### Root Cause
+
+In `_convert_pdf_with_headings`, Phase 2 iterated each pymupdf *line*
+within a block independently:
+
+```python
+for line in block.get("lines", []):
+    if max_size in size_to_level:   # emit as heading
+        ...
+```
+
+There was no notion of a logical heading spanning multiple physical lines.
+
+### Investigation: Block Structure vs Heuristics
+
+The fix direction suggested size+punctuation heuristics (conjunction
+endings, lowercase continuations). Before implementing, we investigated
+whether pymupdf's block structure provides a more reliable signal.
+
+**Finding:** pymupdf's `page.get_text("dict")` groups the lines of a
+wrapped heading into a **single block** with multiple *line* entries, all
+at the same heading font size. This was verified on the real FCCS Info
+Dev PDF (1,349 pages):
+
+```
+Block 10 (bbox=(134.7, 204.5, 556.8, 227.7)):
+  [size=21.0] 'Configuring Detailed Analysis in Financial Consolidation and'
+  [size=21.0] 'Close'
+```
+
+**Measurements on the 1,349-page FCCS Info Dev PDF:**
+
+| Metric                                        | Count |
+|-----------------------------------------------|-------|
+| Single-line heading blocks                    | 1,017 |
+| Multi-line heading blocks (2+ heading lines)  |    57 |
+| Blocks mixing heading-sized + body-sized lines |     0 |
+| Cross-block heading-size adjacency (200 pages)|     1 |
+
+The single cross-block case was TOC chapter numbers ("1" and "2" in
+separate blocks), not a wrapped heading.
+
+**Conclusion:** Block boundaries are a structural signal from the PDF
+layout engine, far more reliable than size+punctuation heuristics. We
+chose block-based stitching: within each block, consecutive heading-sized
+lines at the same font size are joined into one logical heading.
+
+### The Fix
+
+In Phase 2, instead of iterating lines independently, we now:
+1. Collect heading-sized lines within a block into an accumulator
+2. When a body-sized line or a different heading size is encountered,
+   flush the accumulator as a single stitched heading
+3. At the end of each block, flush any remaining accumulator
+
+The `_emit_heading` helper joins parts with a single space, maps the size
+to a heading level, and appends the markdown marker. Duplicate consecutive
+headings are still suppressed.
+
+### Before/After Evidence
+
+Measured on 4 real Oracle FCCS PDFs:
+
+| Document | Pages | BEFORE: Truncated | BEFORE: Stray | AFTER: Truncated | AFTER: Stray |
+|----------|-------|-------------------|---------------|-------------------|--------------|
+| FCCS Info Dev | 1,349 | 7 | 4 | 0 | 0 |
+| FCCS DIEPM    |   871 | 5 | 1 | 0 | 0 |
+| FCCS eCalc    |   354 | 6 | 1 | 0 | 0 |
+| FCCS FR Web   |   233 | 3 | 1 | 0 | 0 |
+| **Total**     | 2,807 | **21** | **7** | **0** | **0** |
+
+All 21 truncated headings are now complete. All 7 stray continuation
+fragments are absorbed into their parent heading.
+
+### Over-Stitching Risk Analysis
+
+**Risk: Could the stitch merge a heading with following body text?**
+
+No. The stitch only joins heading-sized lines *within the same block*.
+Body text is always in a separate block (0 mixed blocks measured in
+1,349 pages). When a body-sized line is encountered within a block, the
+heading accumulator is flushed before the body line is emitted.
+
+**Risk: Could the stitch merge two distinct headings?**
+
+Only if two distinct heading-sized lines at the *same* font size appear
+in the same block. This would be a PDF layout error, not a normal
+document structure. The 57 multi-line heading blocks measured all
+contained wrapped continuations of a single logical heading.
+
+**Risk: Could cross-block heading adjacency cause issues?**
+
+No. Stitching is confined to lines within a single block. The 1
+observed cross-block case (TOC numbers) was correctly NOT stitched.
+
+**Tested boundaries:**
+- `test_wrapped_heading_not_merged_with_following_body`: verifies body
+  text is not absorbed
+- `test_standalone_heading_not_merged_with_body`: verifies a standalone
+  heading remains standalone
+- `test_test_doc_pdf_converts_correctly`: verifies the existing fixture
+  still produces correct headings
+
+### Regression Test
+
+A synthetic fixture (`tests/fixtures/wrapped-heading.pdf`) reproduces
+the multi-line heading pattern: two 18pt lines in one pymupdf block
++ body text in separate blocks + a standalone heading to verify no
+over-stitching. 8 tests in `tests/test_heading_stitching.py` cover
+stitching correctness, no truncation, no stray fragments, no
+over-stitching, and existing behaviour preservation.
