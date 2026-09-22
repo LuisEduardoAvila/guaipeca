@@ -241,6 +241,24 @@ class Converter:
         )
 
         # --- Phase 2: Emit markdown with heading markers ---
+        #
+        # Heading line-wrap stitching:
+        # Oracle PDFs wrap long titles across 2+ physical lines.  pymupdf
+        # groups the lines of a wrapped heading into a single *block* (with
+        # type=0) containing multiple *line* entries at the same heading
+        # font size.  We exploit this block structure: within a block we
+        # collect consecutive heading-sized lines and join them into ONE
+        # logical heading before emitting.  This is more reliable than
+        # size+punctuation heuristics because the block boundary is a
+        # structural signal from the PDF layout engine, not an inference.
+        #
+        # Measurement on 4 real Oracle FCCS PDFs (2026-09-22):
+        #   - 0 blocks mix heading-sized lines with body-sized lines
+        #     (heading and body are always in separate blocks)
+        #   - cross-block heading-size adjacency is extremely rare
+        #     (1 case in 200 pages, TOC numbers in separate blocks)
+        # So stitching is confined to lines *within* a single block.
+        #
         output_lines: list[str] = []
         emitted_headings: list[tuple[int, str, float]] = []  # (level, text, size)
         for page in doc:
@@ -248,12 +266,18 @@ class Converter:
             for block in page_dict.get("blocks", []):
                 if block.get("type", 0) != 0:
                     continue
+
+                # Collect heading-sized and body lines within this block.
+                # Consecutive heading-sized lines at the SAME size are
+                # stitched into a single logical heading.
+                heading_parts: list[str] = []  # accumulator for stitched heading
+                heading_size: float | None = None  # size of the current heading
+
                 for line in block.get("lines", []):
                     spans = [s for s in line.get("spans", []) if s["text"].strip()]
                     if not spans:
                         continue
 
-                    # Use the max font size in the line (handles mixed spans)
                     max_size = max(round(s["size"], 1) for s in spans)
                     line_text = "".join(s["text"] for s in spans).strip()
 
@@ -261,17 +285,40 @@ class Converter:
                         continue
 
                     if max_size in size_to_level:
-                        level = size_to_level[max_size]
-                        # Avoid duplicate consecutive headings
-                        prefix = "#" * level
-                        marker = f"{prefix} {line_text}"
-                        if output_lines and output_lines[-1] == marker:
-                            continue
-                        output_lines.append(marker)
-                        output_lines.append("")  # blank line after heading
-                        emitted_headings.append((level, line_text, max_size))
+                        # Heading-sized line.  If it matches the current
+                        # heading size, accumulate; otherwise flush the
+                        # current heading and start a new one.
+                        if heading_size is not None and max_size == heading_size:
+                            heading_parts.append(line_text)
+                        else:
+                            # Flush previous heading if any
+                            if heading_parts:
+                                _emit_heading(
+                                    heading_parts, heading_size, size_to_level,
+                                    output_lines, emitted_headings,
+                                )
+                                heading_parts = []
+                            heading_parts = [line_text]
+                            heading_size = max_size
                     else:
+                        # Body-sized line.  Flush any pending heading.
+                        if heading_parts:
+                            _emit_heading(
+                                heading_parts, heading_size, size_to_level,
+                                output_lines, emitted_headings,
+                            )
+                            heading_parts = []
+                            heading_size = None
                         output_lines.append(line_text)
+
+                # End of block: flush any pending heading
+                if heading_parts:
+                    _emit_heading(
+                        heading_parts, heading_size, size_to_level,
+                        output_lines, emitted_headings,
+                    )
+                    heading_parts = []
+                    heading_size = None
             output_lines.append("")  # page break separator
 
         doc.close()
@@ -344,6 +391,33 @@ class Converter:
         """Check if a file should be converted based on extension allowlist."""
         ext = Path(file_path).suffix.lower()
         return ext in allowed_extensions
+
+
+def _emit_heading(
+    parts: list[str],
+    size: float,
+    size_to_level: dict[float, int],
+    output_lines: list[str],
+    emitted_headings: list[tuple[int, str, float]],
+) -> None:
+    """Emit a (possibly stitched) heading as a markdown line.
+
+    Joins *parts* with a single space, maps *size* to a heading level,
+    appends the markdown marker + blank line to *output_lines*, and records
+    the heading in *emitted_headings* for later validation.
+
+    Duplicate consecutive headings (same level + text) are suppressed.
+    """
+    text = " ".join(parts)
+    level = size_to_level[size]
+    prefix = "#" * level
+    marker = f"{prefix} {text}"
+    # Suppress exact-duplicate consecutive headings
+    if output_lines and output_lines[-1] == marker:
+        return
+    output_lines.append(marker)
+    output_lines.append("")  # blank line after heading
+    emitted_headings.append((level, text, size))
 
 
 def _validate_heading_tree(
