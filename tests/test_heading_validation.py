@@ -222,7 +222,7 @@ class TestFirstHeadingSanity:
         """
         headings = [(1, "Title", 24.0), (4, "Deep", 14.0)]
         size_to_level = {24.0: 1, 14.0: 4}
-        valid, reasons = _validate_heading_tree(headings, size_to_level)
+        _valid, reasons = _validate_heading_tree(headings, size_to_level)
         # May fail on other signals (e.g. collapse if only 2 levels),
         # but should NOT fail on first-heading sanity
         assert not any("first heading" in r for r in reasons)
