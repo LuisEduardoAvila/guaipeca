@@ -2,7 +2,7 @@
 
 Adapted from a structure-aware chunking strategy:
 - Split on ## headings (structure-aware)
-- Table-aware: tables treated as atomic units
+- Table-aware: tables treated as atomic units (never split mid-table, even with internal blank lines)
 - Code-block-aware: fenced code blocks are never split mid-block
 - Configurable overlap between consecutive chunks
 - Pure Python regex, zero LLM calls
@@ -256,10 +256,12 @@ def _split_on_headings(text: str) -> list[tuple[str, str, int, list[str]]]:
 
 def _split_paragraphs_aware(text: str, max_size: int) -> list[tuple[str, int, int]]:
     """
-    Split text into paragraphs, respecting fenced code blocks.
+    Split text into paragraphs, respecting fenced code blocks and markdown tables.
 
     Never splits inside a fenced code block (``` or ~~~).
-    If a code block exceeds max_size, it is kept as one chunk (even if oversized).
+    Never splits inside a markdown table (pipe-delimited).
+    If a code block or table exceeds max_size, it is kept as one chunk
+    (even if oversized) — mirroring the atomic-unit policy for code blocks.
 
     Returns list of (paragraph_text, start_offset, length) tuples.
     """
@@ -271,6 +273,7 @@ def _split_paragraphs_aware(text: str, max_size: int) -> list[tuple[str, int, in
     in_code_block = False
     code_fence = None
     code_fence_len = 0  # P3-6: track opening fence length
+    in_table = False
 
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -291,8 +294,34 @@ def _split_paragraphs_aware(text: str, max_size: int) -> list[tuple[str, int, in
                     code_fence = None
                     code_fence_len = 0
 
-        # Paragraph boundary: blank line outside code blocks
-        if not in_code_block and not stripped:
+        # Detect table boundaries: a table row starts with | and the next
+        # line is a separator (|---|---|). Table ends at a blank line
+        # only if the next non-blank line is not a table row; or at a
+        # non-table, non-blank line.
+        is_table_row = stripped.startswith("|")
+        if not in_code_block:
+            if not in_table and is_table_row:
+                # Look ahead: is the next line a table separator?
+                if i + 1 < len(lines) and re.match(r"\|[\s\-:|]+\|", lines[i + 1].strip()):
+                    in_table = True
+            elif in_table and not stripped:
+                # Blank line: look ahead — if next non-blank line is a
+                # table row, we're still inside the table.
+                still_table = False
+                for j in range(i + 1, len(lines)):
+                    next_stripped = lines[j].strip()
+                    if not next_stripped:
+                        continue
+                    still_table = next_stripped.startswith("|")
+                    break
+                if not still_table:
+                    in_table = False
+            elif in_table and stripped and not is_table_row:
+                # Non-table, non-blank line ends the table
+                in_table = False
+
+        # Paragraph boundary: blank line outside code blocks and tables
+        if not in_code_block and not in_table and not stripped:
             # Flush current paragraph
             if current_lines:
                 para_text = "\n".join(current_lines)
