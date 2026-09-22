@@ -221,10 +221,26 @@ class Searcher:
         sparse_results: list[dict],
         top_k: int,
     ) -> list[dict]:
-        """Fuse dense and sparse results using Reciprocal Rank Fusion (RRF).
+        """Fuse dense and sparse results using score-normalized RRF.
 
-        RRF score = weight / (k + rank)
-        where k is a constant (default 60) that smooths the ranking.
+        Standard RRF (score = weight / (k + rank)) treats all rank-0
+        results equally, regardless of their raw score magnitude. This
+        means a strong exact-token BM25 hit (raw_score ~11) gets the same
+        fusion boost as a weak dense match (raw_score ~0.001) if both
+        are at rank 0.
+
+        Score-normalized fusion combines rank position with normalized
+        raw scores:
+
+            fused = weight * (alpha * norm_raw + (1 - alpha) * rrf_rank)
+
+        where norm_raw is the raw_score min-max normalized to [0, 1]
+        within each result set, and rrf_rank = 1 / (k + rank + 1).
+
+        This ensures a strong BM25 match outranks a weak dense match
+        at the same rank position, without the problems of simply
+        bumping bm25_weight (which would regress semantic queries where
+        BM25 scores are naturally low).
 
         Args:
             dense_results: Results from FAISS dense search (already ranked).
@@ -238,25 +254,47 @@ class Searcher:
         dense_weight = self.config.search.dense_weight
         sparse_weight = self.config.search.bm25_weight
 
+        # Score-normalization alpha: how much weight to give the raw score
+        # vs the rank position. 0.3 means 30% score quality, 70% rank position.
+        # This preserves RRF's robustness while letting strong matches rise.
+        alpha = getattr(self.config.search, "fusion_alpha", 0.3)
+
         scores_map: dict[str, dict] = {}
 
+        # Helper: min-max normalize raw_scores to [0, 1]
+        def _normalize(results: list[dict]) -> list[float]:
+            if not results:
+                return []
+            raws = [r.get("raw_score", 0.0) for r in results]
+            lo, hi = min(raws), max(raws)
+            rng = hi - lo
+            if rng < 1e-9:
+                return [1.0] * len(results)  # all same → all max
+            return [(r - lo) / rng for r in raws]
+
         # Dense results (rank 0-based)
+        dense_norm = _normalize(dense_results)
         for rank, r in enumerate(dense_results):
             cid = r["chunk_id"]
-            rrf_score = dense_weight / (k + rank + 1)
+            rrf_rank = 1.0 / (k + rank + 1)
+            norm_score = dense_norm[rank] if rank < len(dense_norm) else 0.0
+            fused = dense_weight * (alpha * norm_score + (1 - alpha) * rrf_rank)
             if cid not in scores_map:
                 scores_map[cid] = dict(r)
                 scores_map[cid]["rrf_score"] = 0.0
-            scores_map[cid]["rrf_score"] += rrf_score
+            scores_map[cid]["rrf_score"] += fused
 
         # Sparse results (rank 0-based)
+        sparse_norm = _normalize(sparse_results)
         for rank, r in enumerate(sparse_results):
             cid = r["chunk_id"]
-            rrf_score = sparse_weight / (k + rank + 1)
+            rrf_rank = 1.0 / (k + rank + 1)
+            norm_score = sparse_norm[rank] if rank < len(sparse_norm) else 0.0
+            fused = sparse_weight * (alpha * norm_score + (1 - alpha) * rrf_rank)
             if cid not in scores_map:
                 scores_map[cid] = dict(r)
                 scores_map[cid]["rrf_score"] = 0.0
-            scores_map[cid]["rrf_score"] += rrf_score
+            scores_map[cid]["rrf_score"] += fused
 
         # Sort by RRF score descending
         fused = sorted(

@@ -81,6 +81,7 @@ class SearchConfig:
     max_chars: int = 8000        # Threshold for auto return_mode (chars)
     toc_rerank: bool = False     # Enable ToC keyword re-ranking (Phase 5)
     toc_rerank_weight: float = 0.3  # Weight for ToC re-ranking boost
+    fusion_alpha: float = 0.3    # Score-vs-rank blend in normalized RRF (0=pure rank, 1=pure score)
 
 
 @dataclass
@@ -207,6 +208,7 @@ class GuaipecaConfig:
             max_chars=srch.get("max_chars", 8000),
             toc_rerank=srch.get("toc_rerank", False),
             toc_rerank_weight=srch.get("toc_rerank_weight", 0.3),
+            fusion_alpha=srch.get("fusion_alpha", 0.3),
         )
 
         config = cls(

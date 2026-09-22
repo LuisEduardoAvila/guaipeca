@@ -118,3 +118,4 @@ search:
   bm25_weight: 1.0                # BM25 contribution weight in RRF fusion
   dense_weight: 1.0                # Dense (FAISS) contribution weight in RRF fusion
   rrf_k: 60                        # RRF constant (standard value, higher = smoother ranking)
+  fusion_alpha: 0.3                 # Score-vs-rank blend in normalized RRF (0=pure rank, 1=pure score)
