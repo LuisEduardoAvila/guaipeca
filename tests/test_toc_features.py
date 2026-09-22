@@ -208,18 +208,31 @@ class TestHeadingPath:
         assert "heading_path" in d
         assert isinstance(d["heading_path"], list)
 
-    def test_heading_path_level3_included(self, structured_path):
-        """Level 3 headings (###) should be included in heading_path."""
+    def test_heading_path_excludes_deep_headings(self, structured_path):
+        """Level 3 headings (###) should NOT appear in heading_path.
+
+        heading_path is the path from # down to the enclosing ## section only.
+        Deep headings (###, ####, etc.) are part of section content but do not
+        appear in heading_path. This ensures section_id is always derived from
+        the ## heading, not a deep sub-heading.
+        """
         chunks = chunk_file(structured_path, STRUCTURED_MD, max_size=500)
 
-        # Find a chunk that should be under ### Background
-        # With small max_size, the ### Background content should be its own chunk
-        # within the Introduction section
-        background_chunks = [c for c in chunks if "Background" in c.heading_path]
-        assert len(background_chunks) > 0, (
-            f"No chunks with 'Background' in heading_path. "
-            f"Paths: {[c.heading_path for c in chunks]}"
-        )
+        # No chunk should have 'Background' or 'Chunking Strategy' in heading_path
+        for chunk in chunks:
+            assert 'Background' not in chunk.heading_path, (
+                f"H3 'Background' should not be in heading_path, got: {chunk.heading_path}"
+            )
+            assert 'Chunking Strategy' not in chunk.heading_path, (
+                f"H3 'Chunking Strategy' should not be in heading_path, got: {chunk.heading_path}"
+            )
+
+        # All chunks in the Introduction section should have the same heading_path
+        intro_chunks = [c for c in chunks if c.heading == 'Introduction']
+        for c in intro_chunks:
+            assert c.heading_path == ['Document Title', 'Introduction'], (
+                f"Expected ['Document Title', 'Introduction'], got: {c.heading_path}"
+            )
 
 
 # ===========================================================================

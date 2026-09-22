@@ -91,9 +91,10 @@ def _make_chunk_id(source_path: str, heading: str, offset: int) -> str:
 def _make_section_id(source_path: str, heading_path: list[str]) -> str:
     """Generate a section ID from source path and top-level heading.
 
-    For structured docs: SHA256(source_path + ":" + top_level_heading)[:16]
-    where top_level_heading is the ## heading (heading_path[-1] if heading_path
-    ends with a ## heading, or the first ##-level heading found).
+    For structured docs: SHA256(source_path + ":" + section_heading)[:16]
+    where section_heading is the ## heading (heading_path[-1]).
+    heading_path only contains # and ## headings (deep headings excluded),
+    so heading_path[-1] is always the enclosing ## section heading.
 
     For non-structured docs (empty heading_path): "unstructured:{hash}" where
     hash = SHA256(source_path)[:16].
@@ -191,16 +192,27 @@ def _split_on_headings(text: str) -> list[tuple[str, str, int, list[str]]]:
     Returns list of (heading, text, char_offset, heading_path) tuples.
     Level 1 (#) is treated as document title, included in first chunk.
     Level 3+ (###, ####) stay with their parent ## section.
-    heading_path is the list of headings from level 1 down to the current section's heading.
+
+    heading_path semantics: the path from the document title (#) down to the
+    enclosing ## section heading ONLY. Deep headings (H3/H4/H5/...) do NOT
+    appear in heading_path. This ensures:
+    - section_id is always derived from the ## section heading (heading_path[-1])
+    - ToC tree reflects section-level structure (# -> ##), not deep sub-headings
+    - chunks within the same ## section share the same heading_path and section_id
+
+    Deep headings are part of the section content but never mutate the section's
+    captured heading_path. Splits occur ONLY on level-2 headings.
     """
     sections = []
     current_heading = ""
     current_text = ""
     current_offset = 0
 
-    # Heading stack: list of (level, heading_text) tuples
-    heading_stack: list[tuple[int, str]] = []
-    # The heading_path for the current section (captured when section starts)
+    # Stack for tracking level-1 (#) and level-2 (##) headings only.
+    # Deep headings (H3+) are NOT tracked here — they don't affect heading_path.
+    section_stack: list[tuple[int, str]] = []
+    # The heading_path for the current section (captured ONCE when ## opens).
+    # Frozen: deeper headings inside the section never mutate this.
     current_heading_path: list[str] = []
 
     lines = text.split("\n")
@@ -212,31 +224,48 @@ def _split_on_headings(text: str) -> list[tuple[str, str, int, list[str]]]:
             level = len(match.group(1))
             heading_text = match.group(2).strip()
 
-            # Only split on level 2 headings
             if level == 2:
                 # Save previous section with its captured heading_path
                 if current_text.strip():
                     sections.append((current_heading, current_text.strip(), current_offset, current_heading_path))
 
                 # Pop stack entries deeper than or equal to current level
-                while heading_stack and heading_stack[-1][0] >= level:
-                    heading_stack.pop()
-                # Push current heading onto stack
-                heading_stack.append((level, heading_text))
-                # Capture heading_path for the new section (full stack)
-                current_heading_path = [h for _, h in heading_stack]
+                while section_stack and section_stack[-1][0] >= level:
+                    section_stack.pop()
+                # Push current ## heading onto stack
+                section_stack.append((level, heading_text))
+                # Capture heading_path for the new section ONCE — frozen,
+                # will NOT be mutated by deeper headings inside the section.
+                current_heading_path = [h for _, h in section_stack]
                 current_heading = heading_text
                 current_text = line + "\n"
                 current_offset = pos
+            elif level == 1:
+                # Level 1 (#) — document title or new document section.
+                # If a ## section is in progress, close it first.
+                has_section = any(lvl == 2 for lvl, _ in section_stack)
+                if has_section and current_text.strip():
+                    sections.append((current_heading, current_text.strip(), current_offset, current_heading_path))
+                    current_text = ""
+                # Pop stack entries >= level 1
+                while section_stack and section_stack[-1][0] >= level:
+                    section_stack.pop()
+                section_stack.append((level, heading_text))
+                # If no ## section is active, update heading_path so the
+                # title appears in the pre-section chunk's path.
+                if not has_section:
+                    current_heading_path = [h for _, h in section_stack]
+                else:
+                    # A new # after a ## section: start fresh with just the title
+                    current_heading_path = [h for _, h in section_stack]
+                    current_heading = heading_text
+                    current_offset = pos
+                current_text += line + "\n"
             else:
-                # Level 1, 3, 4, etc. -- keep with current section
-                # Update stack for heading tracking
-                while heading_stack and heading_stack[-1][0] >= level:
-                    heading_stack.pop()
-                heading_stack.append((level, heading_text))
-                # Update current heading_path if section hasn't started yet (no ##)
-                # or if we want sub-headings reflected in the path
-                current_heading_path = [h for _, h in heading_stack]
+                # Level 3+ (###, ####, etc.) — keep with current section.
+                # Do NOT mutate current_heading_path or section_stack.
+                # Deep headings are part of section content but do not
+                # affect the section's heading_path or section_id.
                 current_text += line + "\n"
         else:
             current_text += line + "\n"
@@ -244,7 +273,6 @@ def _split_on_headings(text: str) -> list[tuple[str, str, int, list[str]]]:
 
     # Don't forget the last section
     if current_text.strip():
-        # heading_path = the captured path for this section
         sections.append((current_heading, current_text.strip(), current_offset, current_heading_path))
 
     # If no sections were created (no ## headings), return entire text as one chunk
