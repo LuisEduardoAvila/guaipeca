@@ -199,6 +199,8 @@ search(query="revenue", section_filter="Financial Statements")
 - `documents` — returns full source documents, deduplicated by path, with best chunk score as document score
 - `auto` — returns chunks if total result size < `search.max_chars` (default 8000), otherwise collapses to documents
 
+> **Note on table formatting:** Raw chunk output (`return_mode="chunks"`) may show markdown tables with rows run-together (no blank lines between rows). This is expected — the chunker treats tables as atomic units and preserves row adjacency. For properly formatted tables, use `get_document` or `get_chunk` to retrieve the full text with original formatting.
+
 ### get_chunk
 Retrieve full chunk text by chunk_id from search results.
 ```
@@ -326,7 +328,7 @@ sudo systemctl start guaipeca    # start now
 ```bash
 systemctl status guaipeca
 curl http://127.0.0.1:8090/health
-# → {"status": "ok", "server": "guaipeca", "version": "0.1.0"}
+# → {"status": "ok", "server": "guaipeca", "version": "0.3.0"}
 ```
 
 ### 4. Check logs
