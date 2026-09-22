@@ -73,7 +73,7 @@ class TestDepthSaturation:
     """Test Signal 2: depth saturation detection."""
 
     def test_saturation_at_h6(self):
-        """>20% of headings at H6 → saturation."""
+        """>60% of headings at H6 → saturation."""
         headings = []
         for i in range(20):
             headings.append((1, f"Chapter {i}", 24.0))
@@ -81,6 +81,7 @@ class TestDepthSaturation:
             headings.append((6, f"Deep heading {i}", 13.0))
         size_to_level = {24.0: 1, 13.0: 6}
         valid, reasons = _validate_heading_tree(headings, size_to_level)
+        # 40/60 = 0.667 > 0.60 → fires
         assert not valid
         assert any("saturation" in r for r in reasons)
 
@@ -89,7 +90,7 @@ class TestDepthSaturation:
         headings = [(1, "Title", 24.0)] + [(6, f"Deep {i}", 13.0) for i in range(2)]
         size_to_level = {24.0: 1, 13.0: 6}
         valid, _ = _validate_heading_tree(headings, size_to_level)
-        # 2/3 = 0.67 — that's > 0.20, so this WILL fire
+        # 2/3 = 0.67 — that's > 0.60, so this WILL fire
         assert not valid  # This is correct behavior — 67% at H6 is saturated
 
     def test_no_saturation_when_no_h6(self):
@@ -100,14 +101,12 @@ class TestDepthSaturation:
         assert valid
 
     def test_real_fccs_saturation_passes(self):
-        """Real FCCS PDF has 169/1138 = 0.149 at H6 → should PASS 0.20 threshold.
+        """Real FCCS eCalc Guide has 304/662 = 0.459 at H6 → must PASS 0.60 threshold.
 
-        This is the key regression test: the old threshold of 0.15
-        false-positived on this document by 0.001.
-
-        We build a simplified but structurally faithful version of the
-        real heading tree: H1 → H2 → H3 → H4 → H5 → H6, where H2
-        sections DO have H3+ children (as in the real FCCS PDF).
+        This is the key regression test: the deepest real Oracle FCCS manual
+        measured has 46% of headings at H6. The old threshold of 0.15
+        (and the intermediate 0.20) would reject it. The 0.60 threshold
+        gives it a 0.141 margin.
         """
         headings = [(1, "Oracle FCCS", 35.0)]
         # 33 H2s, each followed by at least one H3 to avoid collapse
@@ -128,7 +127,34 @@ class TestDepthSaturation:
             headings.append((6, f"Detail {i}", 16.0))
         size_to_level = {35.0: 1, 30.0: 2, 24.0: 3, 21.0: 4, 18.0: 5, 16.0: 6}
         valid, reasons = _validate_heading_tree(headings, size_to_level)
-        assert valid, f"Real FCCS distribution should pass: {reasons}"
+        assert valid, f"Real FCCS Info Dev distribution should pass: {reasons}"
+
+    def test_real_fccs_ecalc_saturation_passes(self):
+        """Real FCCS eCalc Guide has 304/662 = 0.459 at H6 → must PASS 0.60 threshold.
+
+        This is the deepest real Oracle manual measured. The old threshold
+        of 0.20 would have rejected it (0.459 >> 0.20).
+        """
+        headings = [(1, "Oracle FCCS eCalc", 35.0)]
+        # 14 H2s with H3 children
+        for i in range(14):
+            headings.append((2, f"Chapter {i+1}", 30.0))
+            headings.append((3, f"Chapter {i+1} Overview", 24.0))
+        # 10 more H3s
+        for i in range(10):
+            headings.append((3, f"Extra Section {i}", 24.0))
+        # 113 H4s
+        for i in range(113):
+            headings.append((4, f"Section {i}", 21.0))
+        # 206 H5s
+        for i in range(206):
+            headings.append((5, f"Subsection {i}", 18.0))
+        # 304 H6s — this is the key: 304/662 = 0.459
+        for i in range(304):
+            headings.append((6, f"Detail {i}", 16.0))
+        size_to_level = {35.0: 1, 30.0: 2, 24.0: 3, 21.0: 4, 18.0: 5, 16.0: 6}
+        valid, reasons = _validate_heading_tree(headings, size_to_level)
+        assert valid, f"Real FCCS eCalc distribution (sat=0.459) should pass: {reasons}"
 
 
 class TestSizeClustering:

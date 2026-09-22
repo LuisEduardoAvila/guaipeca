@@ -48,7 +48,10 @@ _MAX_HEADING_LEVELS = 6
 #
 #   Document              Pages  Collapse  Saturation  MinGap  Valid?
 #   ───────────────────   ─────  ────────  ──────────  ──────  ───────
-#   FCCS PDF (real)        1349    0.030     0.149      2.0     YES
+#   FCCS Info Dev (real)   1349    0.030     0.149      2.0     YES
+#   FCCS DIEPM (real)       871    0.000     0.239      2.0     YES
+#   FCCS eCalc (real)       354    0.000     0.459      2.0     YES
+#   FCCS FR Web (real)      233    0.167     0.140      2.0     YES
 #   test-doc.pdf (real)       5    0.167     0.000      8.0     YES
 #
 # Synthetic fixtures (contrast only):
@@ -71,16 +74,21 @@ _MAX_HEADING_LEVELS = 6
 # levels but H2 sections don't nest into H3 subsections.
 _COLLAPSE_RATIO_THRESHOLD = 0.50
 
-# Signal 2: If too many headings sit at the max level (H6), the size
-# mapping is saturating — distinct sizes crammed into 6 bins.
-# Calibrated on:
-#   - Real FCCS: 169/1138 = 0.149 (PASSES with 0.051 margin)
-#   - oracle-manual-sim: 40/200 = 0.200 (FAILS — synthetic bad fixture)
-#   - test-doc.pdf: 0/8 = 0.000 (PASSES)
-# Threshold 0.20 gives the real doc 0.051 margin while still failing the
-# synthetic bad fixture.  Genuinely broken trees (all headings at max depth)
-# would exceed 0.50+.
-_DEPTH_SATURATION_THRESHOLD = 0.20
+# Signal 2: If the vast majority of headings sit at the max level (H6),
+# the size mapping is saturating — too many distinct sizes crammed into
+# 6 bins, with multiple sizes merged into H6.
+# Calibrated on 4 REAL Oracle FCCS PDFs (2026-09-22):
+#   - FCCS eCalc Guide (354p): 304/662 = 0.459 (deepest real doc)
+#   - FCCS DIEPM Guide (871p): 171/714 = 0.239
+#   - FCCS Info Dev (1349p): 169/1138 = 0.149
+#   - FCCS FR Web (233p): 44/315 = 0.140
+#   - test-doc.pdf (5p): 0/8 = 0.000
+# Threshold 0.60 gives the deepest real doc (0.459) a 0.141 margin.
+# The synthetic bad fixture oracle-manual-sim (0.200) is below this
+# threshold but is still rejected by size-clustering (0.5pt gaps) and
+# first-heading sanity (H6 first).  Depth-saturation is a secondary
+# signal that catches only extreme cases (60%+ at max depth).
+_DEPTH_SATURATION_THRESHOLD = 0.60
 
 # Signal 3: If any two adjacent heading levels have font sizes within 1.0pt,
 # the levels are too close to distinguish reliably (size clustering).
@@ -348,7 +356,7 @@ def _validate_heading_tree(
     1. Collapse ratio: (a) zero H2 headings (all one level → 1.0), or
        (b) ≥3 heading levels but >50% of H2 sections have no H3+ children
        (flat tree where depth is expected).
-    2. Depth saturation: >20% of headings at the max level (H6).
+    2. Depth saturation: >60% of headings at the max level (H6).
     3. Size clustering: any two adjacent heading levels with font sizes
        within 1.0pt of each other.
     4. First-heading sanity: the first heading in the document is deeper
