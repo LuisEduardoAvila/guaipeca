@@ -267,6 +267,8 @@ Guaipeca supports three STAIR-inspired features that leverage document structure
 
 **Non-structured documents** (no heading markers) degrade gracefully: `heading_path` is empty, `section_id` uses `"unstructured:{hash}"`, `get_toc` returns `structured: false`, `section_filter` returns all chunks from that document, and `toc_rerank` skips re-ranking.
 
+**`heading_path` semantics** (v0.3.4+): `heading_path` contains only the document title (`#`, level 1) and the enclosing section heading (`##`, level 2). Deep headings (`###`, `####`, etc.) are part of the section content but do NOT appear in `heading_path`. This ensures `section_id` is always derived from the `##` section heading, so chunks within the same section share the same `section_id`, and chunks from different sections never collide.
+
 ## CLI
 
 ```bash
