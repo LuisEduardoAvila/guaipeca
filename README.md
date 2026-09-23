@@ -192,12 +192,13 @@ search(query="revenue", section_filter="Financial Statements")
 
 **section_mode** groups results by document section, returning full section text instead of individual chunks.
 **section_filter** restricts search to a specific section (by section ID or heading path prefix).
-**dedup_sections** (optional, `dedup_sections=true`) collapses results sharing a `section_id`, keeping only the best-scoring chunk per section. This improves diversity by preventing near-duplicate chunks from the same section crowding results. Default: `false`.
 
 **return_mode** controls result granularity:
 - `chunks` (default) — returns individual chunks with summary, location, and score
 - `documents` — returns full source documents, deduplicated by path, with best chunk score as document score
 - `auto` — returns chunks if total result size < `search.max_chars` (default 8000), otherwise collapses to documents
+
+> **Note:** `dedup_sections` is **not** an MCP tool argument. It is an option on the internal `Searcher.search()` method (`dedup_sections=true`), available when using Guaipeca as a Python library — it collapses results sharing a `section_id`, keeping only the best-scoring chunk per section. It is not exposed over MCP, and the `search` tool does not accept it.
 
 > **Note on table formatting:** Raw chunk output (`return_mode="chunks"`) may show markdown tables with rows run-together (no blank lines between rows). This is expected — the chunker treats tables as atomic units and preserves row adjacency. For properly formatted tables, use `get_document` or `get_chunk` to retrieve the full text with original formatting.
 
