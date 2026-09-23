@@ -23,7 +23,7 @@ Proven on a Raspberry Pi 5 (8GB RAM, ARM64) alongside other services. If it runs
 
 - **Multi-corpus** — define multiple document folders, each with its own weight and topic label
 - **MCP-native** — exposes `search`, `get_chunk`, `get_document`, `list_documents`, `index`, `status`, `list_folders`, `upload`, `delete`, and `get_toc` tools via MCP
-- **Dual transport** — stdio (for local LLM integration) + HTTP (for remote/network access)
+- **Multi-transport** — stdio (for local LLM integration) + HTTP: Streamable HTTP (`POST /mcp`) and legacy SSE (`GET /sse` + `POST /messages`) for remote/network access
 - **Hybrid search** — optional BM25 sparse keyword search fused with FAISS dense vectors via Reciprocal Rank Fusion (RRF)
 - **Any document format** — pymupdf (PDFs with font-based heading detection + line-wrap stitching) + markitdown (DOCX, PPTX, XLSX, HTML → markdown)
 - **Structure-aware chunking** — splits on headings, treats tables as atomic units, zero LLM calls
@@ -369,7 +369,7 @@ guaipeca.yaml (config)
 Indexer     Searcher     MCP Server
   │            │            │
   │            │            ├── stdio transport
-  │            │            └── HTTP/SSE transport (port 8090)
+  │            │            └── HTTP: Streamable (/mcp) + SSE (/sse, /messages) (port 8090)
   │            │
   │            └── FAISS per-corpus + weighted merge
   │            
@@ -506,8 +506,11 @@ See `docs/container-deployment.md` for detailed VM deployment instructions.
   `Authorization: Bearer <token>` headers on HTTP requests. When auth is enabled,
   CORS is restricted (no wildcard origin).
 - **HTTP endpoints:**
-  - `GET /sse` — SSE stream for MCP transport
-  - `POST /messages` — JSON-RPC messages
+  - `POST /mcp` — Streamable HTTP transport (MCP protocol version `2025-06-18`); JSON-RPC request in, JSON-RPC response inline. `initialize` issues an `Mcp-Session-Id` header used on subsequent requests. Modern clients should prefer this endpoint.
+  - `DELETE /mcp` — terminate a Streamable HTTP session (send the `Mcp-Session-Id` header)
+  - `GET /mcp` — returns `405 Method Not Allowed` (Guaipeca has no server-initiated messages; use `POST /mcp`)
+  - `GET /sse` — SSE stream for MCP transport (legacy, still supported)
+  - `POST /messages` — JSON-RPC messages (legacy, still supported)
   - `GET /health` — health check
   - `GET /tools` — list available tools
   - `GET /download/{corpus}/{filename}` — download original file (requires auth, path traversal protected)

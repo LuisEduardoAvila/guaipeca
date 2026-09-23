@@ -37,6 +37,7 @@ MCP Server (mcp_server.py)
   ├─ 10 tools: search, get_chunk, get_document, list_documents, index, status, list_folders, upload, delete, get_toc
   ├─ stdio transport (newline JSON-RPC)
   ├─ HTTP/SSE transport (ThreadingHTTPServer)
+  ├─ Streamable HTTP transport (POST /mcp)
   ├─ Optional Bearer token auth
   └─ Error sanitization (path scrubbing, truncation)
 ```
@@ -238,16 +239,19 @@ Location: `mcp_server.py`
 
 ### Tools
 
-Seven tools are exposed:
+Ten tools are exposed:
 
 | Tool | Purpose |
 |------|---------|
 | `search` | Semantic search across corpora (returns summary + location + score) |
 | `get_chunk` | Retrieve full chunk text by chunk_id |
+| `get_document` | Retrieve a document's full converted text by corpus and source_path |
+| `list_documents` | List indexed documents in a corpus (or all corpora) |
 | `index` | Trigger indexing for a corpus or all corpora |
 | `status` | Get corpus statistics (chunk counts, indexed files) |
 | `list_folders` | List corpora that accept file uploads |
 | `upload` | Upload a base64-encoded file to a corpus |
+| `get_toc` | Get the table of contents for a corpus or a specific document |
 | `delete` | Delete a file from an upload-enabled corpus (triggers incremental reindex) |
 
 ### Transports
@@ -256,12 +260,13 @@ Seven tools are exposed:
 - **HTTP/SSE** — MCP-compliant Server-Sent Events transport:
   - `GET /sse` — Opens a persistent SSE stream; server sends an `endpoint` event with a POST URL
   - `POST /messages?session_id=<id>` — Client sends JSON-RPC messages via POST; server pushes responses through the SSE stream
-  - `GET /health` — Health check endpoint
-  - `GET /tools` — Convenience endpoint listing available tools
-  - `DELETE /documents?corpus=<name>&filename=<name>` — Delete a file from an upload-enabled corpus
-  - Uses `ThreadingHTTPServer` for concurrent request handling (SSE connections are long-lived)
-  - Per-session message queues (`Queue`) for SSE response delivery
-  - Thread-safe session dict protected by `threading.Lock`
+- **Streamable HTTP** — MCP Streamable HTTP transport (protocol `2025-06-18`), responses returned inline:
+  - `POST /mcp` — JSON-RPC request in, JSON-RPC response out inline (`200`, `Content-Type: application/json`). `initialize` issues an `Mcp-Session-Id` response header; subsequent requests must send it. Notifications get `202` with an empty body; batch (JSON array) requests return a JSON array of responses. Requires protocol version `2025-03-26` or later.
+  - `DELETE /mcp` — Terminates a session (`Mcp-Session-Id` header required), returning `200`
+  - `GET /mcp` — Returns `405 Method Not Allowed`: Guaipeca is request/response with no server-initiated messages, so the SSE-upgrade path is intentionally not implemented
+- **Shared endpoints** — `GET /health` (health check), `GET /tools` (convenience endpoint listing available tools), `DELETE /documents?corpus=<name>&filename=<name>` (delete a file from an upload-enabled corpus)
+- **Shared session store** — Legacy SSE and Streamable HTTP sessions live in the same in-memory `sessions` dict, keyed by UUID and protected by a single `threading.Lock`; sessions are tagged by transport and both are cleared on server restart
+- **Implementation** — Uses `ThreadingHTTPServer` for concurrent request handling (SSE connections are long-lived). Per-session message queues (`Queue`) deliver responses over SSE; Streamable HTTP responses are returned inline. No SDK dependency — stdlib `http.server` only.
 - **both** — stdio runs in a daemon thread, HTTP in the main thread
 
 ### Authentication
@@ -431,7 +436,7 @@ Location: `search.py` `_aggregate_sections()`, `index.py` `get_section_chunks()`
 
 ### Feature D: ToC Navigation
 
-The `get_toc` MCP tool (8th tool) returns the table of contents for a corpus or specific document.
+The `get_toc` MCP tool (ninth tool) returns the table of contents for a corpus or specific document.
 
 - If `document` specified: returns nested tree `{title, heading, level, children, chunk_count, structured}`
 - If no document: returns list of `{filename, title, top_level_headings, chunk_count, structured}`
