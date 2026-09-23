@@ -15,6 +15,7 @@ Exposes ten tools via Model Context Protocol:
 Transports:
 - stdio: newline-delimited JSON-RPC over stdin/stdout
 - http: MCP-compliant SSE-based transport (GET /sse + POST /messages)
+        + Streamable HTTP transport (POST /mcp, DELETE /mcp)
 - both: stdio in a daemon thread + HTTP in main thread
 """
 
@@ -39,7 +40,13 @@ from .search import Searcher
 logger = logging.getLogger(__name__)
 
 # MCP protocol version
-MCP_VERSION = "2024-11-05"
+MCP_VERSION = "2025-06-18"
+
+# Known protocol versions for negotiation
+KNOWN_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
+
+# Minimum protocol version required for Streamable HTTP transport (/mcp)
+MIN_STREAMABLE_VERSION = "2025-03-26"
 
 # Tool definitions
 TOOLS = [
@@ -391,8 +398,16 @@ class GuaipecaMCPServer:
             return None
 
         if method == "initialize":
+            # Protocol version negotiation: echo client's version if known,
+            # otherwise fall back to server's default. The R3 minimum-version
+            # check for /mcp is enforced in the HTTP handler, not here.
+            client_version = params.get("protocolVersion", MCP_VERSION)
+            if client_version in KNOWN_PROTOCOL_VERSIONS:
+                negotiated = client_version
+            else:
+                negotiated = MCP_VERSION
             return {
-                "protocolVersion": MCP_VERSION,
+                "protocolVersion": negotiated,
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {
                     "name": "guaipeca",
@@ -780,17 +795,18 @@ class GuaipecaMCPServer:
         cors_origin = "*" if not auth_token else "null"
 
         # Session management: each SSE connection gets a session with a message queue
-        sessions: dict[str, SSESession] = {}
+        sessions: dict[str, MCPSession] = {}
         sessions_lock = threading.Lock()
 
-        class SSESession:
-            """Represents a single SSE client session."""
-            def __init__(self, client_address: str):
+        class MCPSession:
+            """Represents a single MCP session (SSE or Streamable HTTP)."""
+            def __init__(self, client_address: str, transport: str = "sse"):
                 self.session_id = str(uuid.uuid4())
                 self.client_address = client_address
-                self.response_queue: Queue = Queue()
+                self.transport = transport  # "sse" or "streamable"
+                self.response_queue: Queue = Queue()  # used by SSE transport
                 self.active = True
-                # The POST endpoint URL for this session
+                # The POST endpoint URL for this session (SSE only)
                 self.post_endpoint = f"/messages?session_id={self.session_id}"
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -837,7 +853,7 @@ class GuaipecaMCPServer:
                     self.end_headers()
 
                     # Create a new session
-                    session = SSESession(self.client_address[0])
+                    session = MCPSession(self.client_address[0], transport="sse")
                     with sessions_lock:
                         sessions[session.session_id] = session
                     logger.info(f"SSE session started: {session.session_id} from {self.client_address[0]}")
@@ -944,12 +960,224 @@ class GuaipecaMCPServer:
                         self.wfile.write(f.read())
                     return
 
+                # GET /mcp → 405 Method Not Allowed (Streamable HTTP transport
+                # does not support server-initiated SSE streaming)
+                if parsed.path == "/mcp":
+                    self._send_json(405, {
+                        "error": "GET /mcp not supported; use POST /mcp for JSON-RPC requests"
+                    })
+                    return
+
                 # Unknown path
                 self._send_json(404, {"error": "not found"})
 
             def do_POST(self):
                 parsed = urllib.parse.urlparse(self.path)
                 query_params = urllib.parse.parse_qs(parsed.query)
+
+                # Streamable HTTP transport — POST /mcp
+                if parsed.path == "/mcp":
+                    if not self._check_auth():
+                        self._send_json(401, {"error": "unauthorized"})
+                        return
+
+                    content_length = int(self.headers.get("Content-Length", 0))
+                    max_body_size = 10 * 1024 * 1024  # 10MB limit
+                    if content_length > max_body_size:
+                        self._send_json(413, {"error": "request body too large"})
+                        return
+                    body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+
+                    # Parse JSON to determine request type
+                    try:
+                        parsed_body = json.loads(body)
+                    except (json.JSONDecodeError, ValueError):
+                        # Malformed JSON → parse error
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Access-Control-Allow-Origin", cors_origin)
+                        resp_body = json.dumps({
+                            "jsonrpc": "2.0",
+                            "id": None,
+                            "error": {"code": -32700, "message": "Parse error"},
+                        }).encode("utf-8")
+                        self.send_header("Content-Length", str(len(resp_body)))
+                        self.end_headers()
+                        self.wfile.write(resp_body)
+                        return
+
+                    # Batch request (JSON array)
+                    if isinstance(parsed_body, list):
+                        # Empty batch → 200 with empty array (per JSON-RPC 2.0)
+                        if len(parsed_body) == 0:
+                            resp_body = b"[]"
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json")
+                            self.send_header("Content-Length", str(len(resp_body)))
+                            self.send_header("Access-Control-Allow-Origin", cors_origin)
+                            self.end_headers()
+                            self.wfile.write(resp_body)
+                            return
+
+                        responses = []
+                        for entry in parsed_body:
+                            entry_bytes = json.dumps(entry).encode("utf-8")
+                            resp = server_instance._process_jsonrpc(entry_bytes)
+                            if resp is not None:
+                                responses.append(resp)
+
+                        if not responses:
+                            # All entries were notifications → 202 empty body
+                            self.send_response(202)
+                            self.send_header("Content-Length", "0")
+                            self.send_header("Access-Control-Allow-Origin", cors_origin)
+                            self.end_headers()
+                            return
+
+                        resp_body = json.dumps(responses).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(resp_body)))
+                        self.send_header("Access-Control-Allow-Origin", cors_origin)
+                        self.end_headers()
+                        self.wfile.write(resp_body)
+                        return
+
+                    # Single request
+                    if not isinstance(parsed_body, dict):
+                        # Not a valid JSON-RPC object → invalid request error
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Access-Control-Allow-Origin", cors_origin)
+                        resp_body = json.dumps({
+                            "jsonrpc": "2.0",
+                            "id": None,
+                            "error": {"code": -32600, "message": "Invalid Request"},
+                        }).encode("utf-8")
+                        self.send_header("Content-Length", str(len(resp_body)))
+                        self.end_headers()
+                        self.wfile.write(resp_body)
+                        return
+
+                    method = parsed_body.get("method", "")
+                    req_id = parsed_body.get("id")
+                    params = parsed_body.get("params", {})
+                    session_id_header = self.headers.get("Mcp-Session-Id", "").strip()
+
+                    # Handle initialize
+                    if method == "initialize":
+                        # If session header references existing session → reject
+                        if session_id_header:
+                            with sessions_lock:
+                                if session_id_header in sessions:
+                                    self._send_json(400, {"error": "session already initialized"})
+                                    return
+
+                        # R3: Reject protocolVersion < 2025-03-26 on /mcp.
+                        # Only *known* versions below the minimum are rejected here;
+                        # unknown versions fall through and get the server default.
+                        client_version = params.get("protocolVersion", "")
+                        if client_version in KNOWN_PROTOCOL_VERSIONS and client_version < MIN_STREAMABLE_VERSION:
+                            # Known but too old for /mcp
+                            err_resp = {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "error": {
+                                    "code": -32602,
+                                    "message": (
+                                        f"Unsupported protocol version: {client_version}. "
+                                        f"Minimum supported version for Streamable HTTP transport is "
+                                        f"{MIN_STREAMABLE_VERSION}."
+                                    ),
+                                },
+                            }
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json")
+                            self.send_header("Access-Control-Allow-Origin", cors_origin)
+                            resp_body = json.dumps(err_resp).encode("utf-8")
+                            self.send_header("Content-Length", str(len(resp_body)))
+                            self.end_headers()
+                            self.wfile.write(resp_body)
+                            return
+
+                        # Create new session
+                        session = MCPSession(self.client_address[0], transport="streamable")
+                        with sessions_lock:
+                            sessions[session.session_id] = session
+                        logger.info(f"Streamable HTTP session started: {session.session_id} from {self.client_address[0]}")
+
+                        # Process the initialize request
+                        result = server_instance.handle_request(method, params)
+
+                        # Notifications have no id → 202
+                        if result is None or req_id is None:
+                            self.send_response(202)
+                            self.send_header("Content-Length", "0")
+                            self.send_header("Access-Control-Allow-Origin", cors_origin)
+                            self.end_headers()
+                            return
+
+                        resp = {"jsonrpc": "2.0", "id": req_id, "result": result}
+                        resp_body = json.dumps(resp).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(resp_body)))
+                        self.send_header("Mcp-Session-Id", session.session_id)
+                        self.send_header("Access-Control-Allow-Origin", cors_origin)
+                        self.end_headers()
+                        self.wfile.write(resp_body)
+                        return
+
+                    # Non-initialize request: require valid session
+                    if not session_id_header:
+                        self.send_response(400)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Access-Control-Allow-Origin", cors_origin)
+                        resp_body = json.dumps({
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "error": {"code": -32000, "message": "Missing or invalid Mcp-Session-Id header"},
+                        }).encode("utf-8")
+                        self.send_header("Content-Length", str(len(resp_body)))
+                        self.end_headers()
+                        self.wfile.write(resp_body)
+                        return
+
+                    with sessions_lock:
+                        if session_id_header not in sessions:
+                            self.send_response(400)
+                            self.send_header("Content-Type", "application/json")
+                            self.send_header("Access-Control-Allow-Origin", cors_origin)
+                            resp_body = json.dumps({
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "error": {"code": -32000, "message": "Missing or invalid Mcp-Session-Id header"},
+                            }).encode("utf-8")
+                            self.send_header("Content-Length", str(len(resp_body)))
+                            self.end_headers()
+                            self.wfile.write(resp_body)
+                            return
+
+                    # Process the request
+                    result = server_instance.handle_request(method, params)
+
+                    # Notification → 202 empty body
+                    if result is None or req_id is None:
+                        self.send_response(202)
+                        self.send_header("Content-Length", "0")
+                        self.send_header("Access-Control-Allow-Origin", cors_origin)
+                        self.end_headers()
+                        return
+
+                    resp = {"jsonrpc": "2.0", "id": req_id, "result": result}
+                    resp_body = json.dumps(resp).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(resp_body)))
+                    self.send_header("Access-Control-Allow-Origin", cors_origin)
+                    self.end_headers()
+                    self.wfile.write(resp_body)
+                    return
 
                 # Message endpoint — client sends JSON-RPC messages here
                 if parsed.path == "/messages":
@@ -991,9 +1219,31 @@ class GuaipecaMCPServer:
                 self._send_json(404, {"error": "not found"})
 
             def do_DELETE(self):
-                """Handle DELETE requests (file deletion)."""
+                """Handle DELETE requests (session termination and file deletion)."""
                 parsed = urllib.parse.urlparse(self.path)
                 query_params = urllib.parse.parse_qs(parsed.query)
+
+                # DELETE /mcp — terminate a streamable HTTP (or legacy SSE) session
+                if parsed.path == "/mcp":
+                    if not self._check_auth():
+                        self._send_json(401, {"error": "unauthorized"})
+                        return
+
+                    session_id_header = self.headers.get("Mcp-Session-Id", "").strip()
+                    if not session_id_header:
+                        self._send_json(400, {"error": "Missing Mcp-Session-Id header"})
+                        return
+
+                    with sessions_lock:
+                        if session_id_header not in sessions:
+                            self._send_json(404, {"error": "session not found"})
+                            return
+                        session = sessions.pop(session_id_header)
+                        session.active = False
+
+                    logger.info(f"Session terminated via DELETE /mcp: {session_id_header}")
+                    self._send_json(200, {"status": "session terminated"})
+                    return
 
                 # DELETE /documents?corpus=<name>&filename=<name>
                 if parsed.path == "/documents":
@@ -1022,8 +1272,30 @@ class GuaipecaMCPServer:
                 self.send_response(204)
                 self.send_header("Access-Control-Allow-Origin", cors_origin)
                 self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id")
                 self.end_headers()
+
+            def send_error(self, code, message=None, explain=None):
+                """Override send_error to catch ConnectionError.
+
+                When a client sends a malformed request line and immediately
+                closes the connection (e.g. a port scanner or a healthcheck
+                that sends garbage), BaseHTTPRequestHandler.parse_request()
+                calls send_error() which tries to write an HTML error body.
+                If the socket is already closed, the write raises
+                BrokenPipeError / ConnectionResetError, producing a noisy
+                traceback in the logs even though the server survives.
+
+                This override delegates to the parent implementation and
+                silently swallows ConnectionError so the handler exits
+                cleanly without an unhandled-exception traceback.
+                """
+                try:
+                    super().send_error(code, message, explain)
+                except (ConnectionError, BrokenPipeError):
+                    # Client gone — nothing we can do. Close the connection
+                    # and move on without a traceback.
+                    self.close_connection = True
 
             def log_message(self, format, *args):
                 logger.debug(f"HTTP {format % args}")

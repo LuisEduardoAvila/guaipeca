@@ -49,7 +49,7 @@ indexing:
 
 # MCP Server configuration
 server:
-  transport: http                # http only in container (no stdio needed)
+  transport: http                # http only in container (no stdio needed); serves Streamable HTTP (POST /mcp) + legacy SSE
   port: 8090                     # MCP HTTP/SSE port
   host: 0.0.0.0                  # bind to all interfaces for container access
   # auth_token: "your-secret-token"  # Optional: set to require Bearer token auth
