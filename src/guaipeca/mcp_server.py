@@ -1278,6 +1278,28 @@ class GuaipecaMCPServer:
                 self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id")
                 self.end_headers()
 
+            def send_error(self, code, message=None, explain=None):
+                """Override send_error to catch ConnectionError.
+
+                When a client sends a malformed request line and immediately
+                closes the connection (e.g. a port scanner or a healthcheck
+                that sends garbage), BaseHTTPRequestHandler.parse_request()
+                calls send_error() which tries to write an HTML error body.
+                If the socket is already closed, the write raises
+                BrokenPipeError / ConnectionResetError, producing a noisy
+                traceback in the logs even though the server survives.
+
+                This override delegates to the parent implementation and
+                silently swallows ConnectionError so the handler exits
+                cleanly without an unhandled-exception traceback.
+                """
+                try:
+                    super().send_error(code, message, explain)
+                except (ConnectionError, BrokenPipeError):
+                    # Client gone — nothing we can do. Close the connection
+                    # and move on without a traceback.
+                    self.close_connection = True
+
             def log_message(self, format, *args):
                 logger.debug(f"HTTP {format % args}")
 
