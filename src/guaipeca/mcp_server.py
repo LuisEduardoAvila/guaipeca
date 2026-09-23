@@ -1073,35 +1073,32 @@ class GuaipecaMCPServer:
                                     self._send_json(400, {"error": "session already initialized"})
                                     return
 
-                        # R3: Reject protocolVersion < 2025-03-26 on /mcp
+                        # R3: Reject protocolVersion < 2025-03-26 on /mcp.
+                        # Only *known* versions below the minimum are rejected here;
+                        # unknown versions fall through and get the server default.
                         client_version = params.get("protocolVersion", "")
-                        if client_version and (
-                            client_version not in KNOWN_PROTOCOL_VERSIONS
-                            or client_version < MIN_STREAMABLE_VERSION
-                        ):
-                            # Unknown version or version below minimum → reject
-                            if client_version in KNOWN_PROTOCOL_VERSIONS and client_version < MIN_STREAMABLE_VERSION:
-                                # Known but too old for /mcp
-                                err_resp = {
-                                    "jsonrpc": "2.0",
-                                    "id": req_id,
-                                    "error": {
-                                        "code": -32602,
-                                        "message": (
-                                            f"Unsupported protocol version: {client_version}. "
-                                            f"Minimum supported version for Streamable HTTP transport is "
-                                            f"{MIN_STREAMABLE_VERSION}."
-                                        ),
-                                    },
-                                }
-                                self.send_response(200)
-                                self.send_header("Content-Type", "application/json")
-                                self.send_header("Access-Control-Allow-Origin", cors_origin)
-                                resp_body = json.dumps(err_resp).encode("utf-8")
-                                self.send_header("Content-Length", str(len(resp_body)))
-                                self.end_headers()
-                                self.wfile.write(resp_body)
-                                return
+                        if client_version in KNOWN_PROTOCOL_VERSIONS and client_version < MIN_STREAMABLE_VERSION:
+                            # Known but too old for /mcp
+                            err_resp = {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "error": {
+                                    "code": -32602,
+                                    "message": (
+                                        f"Unsupported protocol version: {client_version}. "
+                                        f"Minimum supported version for Streamable HTTP transport is "
+                                        f"{MIN_STREAMABLE_VERSION}."
+                                    ),
+                                },
+                            }
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json")
+                            self.send_header("Access-Control-Allow-Origin", cors_origin)
+                            resp_body = json.dumps(err_resp).encode("utf-8")
+                            self.send_header("Content-Length", str(len(resp_body)))
+                            self.end_headers()
+                            self.wfile.write(resp_body)
+                            return
 
                         # Create new session
                         session = MCPSession(self.client_address[0], transport="streamable")
