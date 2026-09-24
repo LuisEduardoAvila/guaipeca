@@ -21,6 +21,10 @@ import pytest
 
 from guaipeca.converter import Converter
 
+# Real Oracle FCCS calibration PDF (see docs/heading-validation.md).
+# Tests that need the full document skip when it is absent.
+_FCCS_PDF = "/tmp/guaipeca-calib/oracle-fccs.pdf"
+
 
 @pytest.fixture
 def converter():
@@ -157,3 +161,87 @@ class TestExistingBehaviour:
         for i in range(1, len(headings)):
             if headings[i] == headings[i - 1]:
                 pytest.fail(f"Duplicate consecutive heading: {headings[i]}")
+
+class TestChapterNumberTitleMerge:
+    """Bare section labels (chapter numbers) must merge with their titles.
+
+    Regression: Oracle FCCS typesets the chapter number and the chapter title
+    as adjacent heading-sized lines in the SAME block but at DIFFERENT font
+    sizes (e.g. 30pt number + 24pt title).  The old size-equality-only
+    stitcher emitted "## 5" and "### Managing Security" as two headings.
+    """
+
+    def test_bare_label_regex_matches_structural_labels(self):
+        from guaipeca.converter import _BARE_SECTION_LABEL
+
+        for label in ["1", "5", "10", "30", "5.2", "5.10.3", "A.1", "Chapter 5", "Section 3.1"]:
+            assert _BARE_SECTION_LABEL.match(label), f"should match: {label!r}"
+
+    def test_bare_label_regex_rejects_prose_and_lone_letters(self):
+        from guaipeca.converter import _BARE_SECTION_LABEL
+
+        # Prose titles and a lone letter (e.g. an appendix "A" heading, which
+        # is usually a real standalone heading) must NOT match.
+        for prose in [
+            "Managing Security",
+            "Creating and Running an EPM Center of Excellence",
+            "Overview of the Home Page",
+            "1 Introduction",  # label + text on one line = already a title
+            "A",
+        ]:
+            assert not _BARE_SECTION_LABEL.match(prose), f"should NOT match: {prose!r}"
+
+    def test_chapter_number_and_title_merge(self, converter):
+        """A bare number heading followed by a different-size title merges.
+
+        Note: on the real FCCS PDF, double-digit chapter numbers (10+) are
+        emitted by pymupdf as a SEPARATE block from the title, so this only
+        asserts the single-digit chapters that share a block.
+        """
+        import os
+
+        import pytest
+
+        if not os.path.exists(_FCCS_PDF):
+            pytest.skip("real FCCS calibration PDF not present")
+
+        md = converter._convert_pdf_with_headings(_FCCS_PDF)
+        headings = _extract_headings(md)
+
+        # Body chapter headings (H1-H3) must carry their title, not be bare
+        # numbers.  TOC page numbers (H5) are legitimately bare, so only
+        # check levels 1-3.
+        bare = [h for h in headings if h[1].strip().isdigit()]
+        body_bare = [h for h in bare if h[0] <= 3]
+        # Single-digit chapters (1-9) share a block with the title and must
+        # merge.  Double-digit chapters are a separate-block case (see
+        # test_chapter_number_cross_block) and are excluded here.
+        single_digit_bare = [h for h in body_bare if len(h[1].strip()) == 1]
+        assert single_digit_bare == [], (
+            f"unmerged single-digit chapter numbers: {single_digit_bare}"
+        )
+
+        # And a known chapter must carry its name.
+        ch5 = [h for h in headings if h[1].startswith("5 ") and "Managing Security" in h[1]]
+        assert len(ch5) == 1, f"expected merged '5 Managing Security', got {ch5}"
+
+    def test_chapter_number_cross_block(self, converter):
+        """Double-digit chapters (separate block from title) must also merge.
+
+        pymupdf splits the 30pt number and 24pt title into different blocks
+        for chapters 10+; the stitcher must bridge that boundary in the same
+        way it already does for TOC numbers.
+        """
+        import os
+
+        import pytest
+
+        if not os.path.exists(_FCCS_PDF):
+            pytest.skip("real FCCS calibration PDF not present")
+
+        md = converter._convert_pdf_with_headings(_FCCS_PDF)
+        headings = _extract_headings(md)
+
+        # Chapter 10's title must be attached to its number.
+        ch10 = [h for h in headings if h[1].startswith("10 ") and "Integrating Cloud EPM" in h[1]]
+        assert len(ch10) == 1, f"expected merged '10 Integrating Cloud EPM...', got {ch10}"
