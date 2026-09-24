@@ -823,7 +823,9 @@ class GuaipecaMCPServer:
         # Restrict CORS to non-wildcard when auth is enabled
         cors_origin = "*" if not auth_token else "null"
         # Configurable request-body cap (see ServerConfig.max_body_size).
-        max_body_size = self.config.server.max_body_size
+        # Read defensively: tests and embedding callers may pass a duck-typed
+        # config whose .server only exposes auth_token.
+        max_body_size = getattr(self.config.server, "max_body_size", 73400320)
 
         # Security nice-to-have: warn when exposed on a non-loopback interface
         # without auth. Optional auth is intentional by design, so this is a

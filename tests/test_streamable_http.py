@@ -31,6 +31,9 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from guaipeca.mcp_server import TOOLS, MCP_VERSION, KNOWN_PROTOCOL_VERSIONS
 from guaipeca import __version__
 
+# Default request-body cap, mirrors config.ServerConfig.max_body_size (70MB).
+DEFAULT_MAX_BODY_SIZE = 73400320
+
 
 # ---- Mock MCP Server (no embedding model needed) ----
 
@@ -740,10 +743,13 @@ class TestEdgeCases:
         assert resp["error"]["code"] == -32700
 
     def test_oversized_body(self, http_server):
-        """Oversized body (>10MB) → 413."""
+        """Oversized body (over server.max_body_size) → 413."""
         session_id, _ = _initialize(http_server["mcp_url"])
 
-        big_data = b"x" * (10 * 1024 * 1024 + 1)
+        # Must exceed the configured cap, not a hardcoded 10MB: the default is
+        # server.max_body_size = 70MB (see config.ServerConfig).
+        cap = DEFAULT_MAX_BODY_SIZE
+        big_data = b"x" * (cap + 1)
         req = urllib.request.Request(http_server["mcp_url"], data=big_data, method="POST")
         req.add_header("Content-Type", "application/json")
         req.add_header("Mcp-Session-Id", session_id)
@@ -757,10 +763,29 @@ class TestEdgeCases:
             # Server may close connection (BrokenPipe) after sending 413
             # before client finishes sending the oversized body.
             # This is acceptable — the server rejected the request.
-            # Verify via a separate request that the server is still running.
             status = 413
 
         assert status == 413
+
+    def test_body_at_cap_accepted(self, http_server):
+        """A body at/under the raised cap is no longer rejected (regression:
+        the old hardcoded 10MB limit made anything >10MB 413)."""
+        session_id, _ = _initialize(http_server["mcp_url"])
+
+        # 10MB + 1 previously tripped the old hardcoded limit; with the
+        # configurable default (70MB) it must be accepted, not 413.
+        body = b"x" * (10 * 1024 * 1024 + 1)
+        req = urllib.request.Request(http_server["mcp_url"], data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Mcp-Session-Id", session_id)
+
+        try:
+            resp_obj = urllib.request.urlopen(req, timeout=10)
+            status = resp_obj.status
+        except urllib.error.HTTPError as e:
+            status = e.code
+
+        assert status != 413
 
 
 # ===========================================================================
