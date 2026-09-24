@@ -822,6 +822,8 @@ class GuaipecaMCPServer:
         auth_token = self.config.server.auth_token
         # Restrict CORS to non-wildcard when auth is enabled
         cors_origin = "*" if not auth_token else "null"
+        # Configurable request-body cap (see ServerConfig.max_body_size).
+        max_body_size = self.config.server.max_body_size
 
         # Security nice-to-have: warn when exposed on a non-loopback interface
         # without auth. Optional auth is intentional by design, so this is a
@@ -1026,7 +1028,7 @@ class GuaipecaMCPServer:
                         return
 
                     content_length = int(self.headers.get("Content-Length", 0))
-                    max_body_size = 10 * 1024 * 1024  # 10MB limit
+                    # Enforce configurable max body size to prevent memory exhaustion
                     if content_length > max_body_size:
                         self._send_json(413, {"error": "request body too large"})
                         return
@@ -1241,8 +1243,7 @@ class GuaipecaMCPServer:
                         session = sessions[session_id]
 
                     content_length = int(self.headers.get("Content-Length", 0))
-                    # Enforce max body size to prevent memory exhaustion
-                    max_body_size = 10 * 1024 * 1024  # 10MB limit
+                    # Enforce configurable max body size to prevent memory exhaustion
                     if content_length > max_body_size:
                         self._send_json(413, {"error": "request body too large"})
                         return
