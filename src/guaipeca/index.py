@@ -160,6 +160,9 @@ class CorpusIndex:
 
         # Thread safety: read-write lock for concurrent search / exclusive indexing
         self._rwlock = _ReadWriteLock()
+        # Serializes lazy loading: only one thread may populate index state from
+        # disk at a time; others wait and then reuse the loaded index.
+        self._load_lock = threading.Lock()
 
     def _file_hash(self, file_path: str) -> str:
         """SHA256 hash of file content."""
@@ -509,11 +512,27 @@ class CorpusIndex:
         return faiss.IndexFlatIP(self.embedder.dimensions)
 
     def _load(self):
-        """Load existing index and metadata from disk."""
+        """Load existing index and metadata from disk.
+
+        Idempotent and thread-safe: a fast unlocked check avoids lock contention
+        on the common (already-loaded) path, while ``_load_lock`` ensures only
+        one thread actually populates the shared state. Other threads block on
+        the lock and then observe ``self._loaded`` as True.
+        """
         if self._loaded:
             return
 
+        with self._load_lock:
+            # Double-checked: another thread may have loaded while we waited.
+            if self._loaded:
+                return
 
+            self._load_unlocked()
+            # Set the flag LAST, after all shared state is fully populated.
+            self._loaded = True
+
+    def _load_unlocked(self) -> None:
+        """Populate index state from disk. Caller must hold ``_load_lock``."""
         # Load file hashes
         if self.hashes_path.exists():
             with open(self.hashes_path, "r") as f:
@@ -562,8 +581,6 @@ class CorpusIndex:
 
         # Load BM25 index
         self._load_bm25()
-
-        self._loaded = True
 
     def _save(self):
         """Persist index and metadata to disk with atomic writes.
@@ -898,23 +915,27 @@ class CorpusIndex:
         Returns:
             List of result dicts with chunk data and score.
         """
-        # Acquire read lock only long enough to get index reference and copy state
+        # Hold the read lock across the FAISS search call. The read lock allows
+        # many concurrent readers but excludes writers, so a concurrent
+        # index.add() (which mutates the underlying C++ faiss.IndexFlatIP) cannot
+        # run while we search. Searching the native index outside the lock would
+        # be a data race on the shared native object (undefined behavior).
         with self._rwlock.read_lock():
             self._load()
             faiss_index = self._faiss_index
             chunks_snapshot = list(self._chunks)  # shallow copy for consistent reads
 
-        if faiss_index is None or faiss_index.ntotal == 0:
-            return []
+            if faiss_index is None or faiss_index.ntotal == 0:
+                return []
 
-        # Over-fetch to compensate for stale results that will be filtered out
-        fetch_k = min(top_k * 3, faiss_index.ntotal)
+            # Over-fetch to compensate for stale results that will be filtered out
+            fetch_k = min(top_k * 3, faiss_index.ntotal)
 
-        # Search FAISS (without holding the lock)
-        scores, indices = faiss_index.search(
-            query_vector.reshape(1, -1).astype(np.float32),
-            fetch_k,
-        )
+            # Search FAISS while holding the read lock
+            scores, indices = faiss_index.search(
+                query_vector.reshape(1, -1).astype(np.float32),
+                fetch_k,
+            )
 
         results = []
         for score, idx in zip(scores[0], indices[0]):
@@ -995,6 +1016,7 @@ class CorpusIndex:
         """
         with self._rwlock.read_lock():
             self._load()
+            faiss_index = self._faiss_index
             chunks_snapshot = list(self._chunks)
             section_to_positions = dict(self._section_to_positions)
 
@@ -1027,7 +1049,7 @@ class CorpusIndex:
         for pos in positions:
             if pos < len(chunks_snapshot):
                 vec = np.zeros((1, self.embedder.dimensions), dtype=np.float32)
-                self._faiss_index.reconstruct(pos, vec[0])
+                faiss_index.reconstruct(pos, vec[0])
                 vectors.append(vec[0])
                 valid_positions.append(pos)
 
