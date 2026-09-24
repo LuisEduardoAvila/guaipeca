@@ -107,6 +107,12 @@ class ServerConfig:
     port: int = 8090
     host: str = "127.0.0.1"  # P1-5: default to localhost for security
     auth_token: str | None = None  # P1-5: optional Bearer token auth
+    # Max HTTP request body size (bytes). Caps the streamable-HTTP/SSE request
+    # bodies so a single request cannot exhaust memory. Note upload file content
+    # is base64-encoded in the JSON body (~4/3 of raw size), so this must exceed
+    # upload.max_file_size by ~33% or large uploads will 413 before the upload
+    # tool's own size check runs. Default 70MB leaves headroom for a 50MB file.
+    max_body_size: int = 73400320  # 70MB
 
 
 @dataclass
@@ -178,6 +184,7 @@ class GuaipecaConfig:
             port=srv.get("port", 8090),
             host=srv.get("host", "127.0.0.1"),
             auth_token=srv.get("auth_token"),
+            max_body_size=srv.get("max_body_size", 73400320),
         )
         # Allow env var override for auth token (security best practice)
         env_token = os.environ.get("GUAIPECA_AUTH_TOKEN")
@@ -258,6 +265,8 @@ class GuaipecaConfig:
             raise ValueError(f"server.port must be an integer 1-65535, got: {self.server.port!r}")
         if self.server.auth_token is not None and not isinstance(self.server.auth_token, str):
             raise ValueError(f"server.auth_token must be a string or null, got: {type(self.server.auth_token).__name__}")
+        if not isinstance(self.server.max_body_size, int) or self.server.max_body_size < 1:
+            raise ValueError(f"server.max_body_size must be a positive integer, got: {self.server.max_body_size!r}")
 
         # Search config
         if not isinstance(self.search.hybrid, bool):

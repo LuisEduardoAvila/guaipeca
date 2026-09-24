@@ -822,6 +822,25 @@ class GuaipecaMCPServer:
         auth_token = self.config.server.auth_token
         # Restrict CORS to non-wildcard when auth is enabled
         cors_origin = "*" if not auth_token else "null"
+        # Configurable request-body cap (see ServerConfig.max_body_size).
+        # Read defensively: tests and embedding callers may pass a duck-typed
+        # config whose .server only exposes auth_token.
+        max_body_size = getattr(self.config.server, "max_body_size", 73400320)
+
+        # Security nice-to-have: warn when exposed on a non-loopback interface
+        # without auth. Optional auth is intentional by design, so this is a
+        # warning only — it does not alter request handling.
+        if not auth_token and _is_non_loopback_host(host):
+            logger.warning(
+                "=" * 60 + "\n"
+                f"⚠️  UNAUTHENTICATED PUBLIC BIND: host={host!r}\n"
+                "   No auth_token is configured, so ALL endpoints are\n"
+                "   reachable WITHOUT authentication from any client that\n"
+                "   can reach this address.\n"
+                "   To require auth: set server.auth_token in the config.\n"
+                "   To restrict to this machine: bind host=127.0.0.1.\n"
+                + "=" * 60
+            )
 
         # Security nice-to-have: warn when exposed on a non-loopback interface
         # without auth. Optional auth is intentional by design, so this is a
@@ -1026,7 +1045,7 @@ class GuaipecaMCPServer:
                         return
 
                     content_length = int(self.headers.get("Content-Length", 0))
-                    max_body_size = 10 * 1024 * 1024  # 10MB limit
+                    # Enforce configurable max body size to prevent memory exhaustion
                     if content_length > max_body_size:
                         self._send_json(413, {"error": "request body too large"})
                         return
@@ -1241,8 +1260,7 @@ class GuaipecaMCPServer:
                         session = sessions[session_id]
 
                     content_length = int(self.headers.get("Content-Length", 0))
-                    # Enforce max body size to prevent memory exhaustion
-                    max_body_size = 10 * 1024 * 1024  # 10MB limit
+                    # Enforce configurable max body size to prevent memory exhaustion
                     if content_length > max_body_size:
                         self._send_json(413, {"error": "request body too large"})
                         return
