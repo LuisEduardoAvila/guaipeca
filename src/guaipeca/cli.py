@@ -70,6 +70,9 @@ def _create_services(config: GuaipecaConfig):
         model_name=config.embedding.model,
         cache_dir=config.embedding.cache_dir,
         dimensions=config.embedding.dimensions,
+        preprocess=config.embedding.preprocess,
+        cache_ttl_seconds=config.embedding.cache_ttl_seconds,
+        cache_max_entries=config.embedding.cache_max_entries,
     )
     searcher = Searcher(config=config, embedding_service=embedder, converter=converter)
     return converter, embedder, searcher
@@ -146,6 +149,9 @@ def cmd_status(args):
         model_name=config.embedding.model,
         cache_dir=config.embedding.cache_dir,
         dimensions=config.embedding.dimensions,
+        preprocess=config.embedding.preprocess,
+        cache_ttl_seconds=config.embedding.cache_ttl_seconds,
+        cache_max_entries=config.embedding.cache_max_entries,
     )
     searcher = Searcher(config=config, embedding_service=embedder)
 
@@ -185,6 +191,9 @@ def cmd_check_model(args):
         model_name=config.embedding.model,
         cache_dir=config.embedding.cache_dir,
         dimensions=config.embedding.dimensions,
+        preprocess=config.embedding.preprocess,
+        cache_ttl_seconds=config.embedding.cache_ttl_seconds,
+        cache_max_entries=config.embedding.cache_max_entries,
     )
 
     # Check if model is cached
