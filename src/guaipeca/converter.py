@@ -325,8 +325,13 @@ class Converter:
                         elif heading_is_label and max_size != heading_size:
                             # Case (b): bare label followed by the title at a
                             # different size — merge, keep the label's level.
+                            # Adopt the title's size so subsequent lines (e.g.
+                            # the wrapped tail of a long title) accumulate via
+                            # case (a) instead of being flushed as a new
+                            # heading.  The level still comes from the label.
                             heading_parts.append(line_text)
                             heading_is_label = False
+                            heading_size = max_size
                         elif max_size == heading_size:
                             # Case (a): wrapped title, same size — accumulate.
                             heading_parts.append(line_text)
