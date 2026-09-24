@@ -1300,12 +1300,23 @@ class GuaipecaMCPServer:
             def log_message(self, format, *args):
                 logger.debug(f"HTTP {format % args}")
 
-        # Use ThreadingHTTPServer for concurrent request handling
-        # (SSE connections are long-lived, so single-threaded would block)
+        # Use ThreadingHTTPServer for concurrent request handling.
+        # (SSE connections are long-lived, so single-threaded would block.)
+        #
+        # daemon_threads + block_on_close are essential for graceful shutdown:
+        # ThreadingHTTPServer spawns one non-daemon thread per connection by
+        # default and server_close() joins them.  Long-lived SSE streams keep
+        # those threads parked, so even after serve_forever() stops the
+        # interpreter blocks at exit waiting on the workers.  Making them
+        # daemon threads and skipping the join lets the process exit promptly.
+        class _Server(http.server.ThreadingHTTPServer):
+            daemon_threads = True
+            block_on_close = False
+
         actual_port = port
         for attempt in range(5):
             try:
-                httpd = http.server.ThreadingHTTPServer((host, actual_port), Handler)
+                httpd = _Server((host, actual_port), Handler)
                 break
             except OSError:
                 actual_port += 1
@@ -1316,17 +1327,52 @@ class GuaipecaMCPServer:
         logger.info(f"Starting Guaipeca MCP server (HTTP/SSE) on {host}:{actual_port}")
         print(f"Guaipeca MCP server listening on http://{host}:{actual_port}", file=sys.stderr)
 
+        # Graceful shutdown: the signal handler must NOT call httpd.shutdown()
+        # directly — that call blocks waiting for serve_forever() to acknowledge
+        # the shutdown flag, and the handshake deadlocks when the handler runs
+        # in the same thread as serve_forever().  Instead the handler only sets
+        # a threading.Event; a background thread calls httpd.shutdown() after
+        # the event fires, unblocking serve_forever() cleanly.
         import signal
-        def _handle_term(signum, frame):
-            logger.info("Received SIGTERM, shutting down HTTP server")
-            httpd.shutdown()
-        signal.signal(signal.SIGTERM, _handle_term)
 
+        _shutdown_event = threading.Event()
+
+        def _handle_term(signum, frame):
+            logger.info("Received %s, initiating shutdown", signal.Signals(signum).name)
+            _shutdown_event.set()
+        signal.signal(signal.SIGTERM, _handle_term)
+        signal.signal(signal.SIGINT, _handle_term)
+
+        # Run serve_forever() in a daemon thread so the main thread can wait
+        # on the shutdown event without blocking the signal handler.
+        _serve_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        _serve_thread.start()
+
+        # Block until a signal sets the event.
+        _shutdown_event.wait()
+
+        logger.info("Shutdown flag set, stopping HTTP server")
+        httpd.shutdown()
+        _serve_thread.join(timeout=5)
         try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            logger.info("HTTP server shutting down")
-            httpd.shutdown()
+            httpd.server_close()
+        except Exception:
+            pass
+        logger.info("HTTP server stopped, exiting process")
+
+        # Force-exit to bypass native non-daemon thread pools spawned by
+        # fastembed/numpy (rayon in tokenizers.abi3.so, BLAS in
+        # libscipy_openblas64).  Those threads park on condvar waits for
+        # the lifetime of the process and have no stop API.  If we return
+        # normally the interpreter blocks at finalization waiting for them,
+        # wedging the process in futex_do_wait — systemd's stop times out
+        # and the port stays bound until a SIGKILL.
+        for _stream in (sys.stdout, sys.stderr):
+            try:
+                _stream.flush()
+            except Exception:
+                pass
+        os._exit(0)
 
     def run(self, transport: str = "both", host: str = "127.0.0.1", port: int = 8090):
         """Run the server with the specified transport(s)."""
