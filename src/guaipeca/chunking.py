@@ -405,8 +405,9 @@ def _chunk_by_paragraph(
     current_text = ""
     offset = base_offset
     overlap_text = ""
-    # P2-4: Track the length of the original (non-overlap) content in the current chunk
-    # so overlap is only extracted from the original content, not from previous overlap
+    # P2-4/Review-P1: Track the length of the original (non-overlap) content in
+    # the current chunk so overlap is only extracted from the original content,
+    # never from a previous chunk's overlap (prevents compounding).
     current_original_len = 0
 
     for para_text, para_start, para_len in paragraphs:
@@ -440,12 +441,18 @@ def _chunk_by_paragraph(
                     overlap_text = original_content
                 offset += len(current_text) + 2
             current_text = candidate
-            # Track original content length (candidate = overlap_text + para)
-            current_original_len = len(para) if overlap_text else len(candidate)
+            # Track original content length (candidate = overlap_text + para).
+            # The overlap text is copied from the previous chunk, so only the
+            # paragraph itself counts as original content; the offset of the
+            # overlap region within the concatenated text is therefore
+            # len(overlap_text) + 2 (the "\n\n" separator).
+            current_original_len = len(overlap_text) + 2 + len(para) if overlap_text else len(candidate)
         else:
             current_text = current_text + "\n\n" + candidate if current_text else candidate
-            if not overlap_text:
-                current_original_len = len(current_text)
+            # The chunk now also contains this paragraph as original content;
+            # extend the original-content length to match the new total so the
+            # next overlap is extracted from the correct (latest) position.
+            current_original_len = len(current_text)
 
     if current_text:
         chunk_id = _make_chunk_id(source_path, heading, offset)

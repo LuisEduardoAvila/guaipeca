@@ -29,6 +29,19 @@ from guaipeca.converter import Converter
 from guaipeca.search import Searcher
 
 
+def _model_available(svc) -> bool:
+    """Best-effort check that the fastembed model can be loaded.
+
+    Tests that exercise the real model bail out gracefully when fastembed
+    or the model weights are unavailable (e.g. offline CI).
+    """
+    try:
+        _ = svc.model
+        return True
+    except Exception:
+        return False
+
+
 # ===========================================================================
 # 1. FAISS Backup + Corruption Recovery
 # ===========================================================================
@@ -476,6 +489,46 @@ class TestEmbeddingCacheConfig:
         cfg = GuaipecaConfig.from_yaml(str(config_path))
         assert cfg.embedding.cache_ttl_seconds == 3600
         assert cfg.embedding.cache_max_entries == 10000
+
+
+class TestZeroSizeCacheRegression:
+    """Regression: cache_max_entries=0 (or negative) and ttl<=0 must not crash.
+
+    Previously a maxsize of 0 made the LRU eviction loop call
+    ``next(iter(...))`` on an empty OrderedDict, raising StopIteration on
+    every embed/search call. Zero size is now treated as "cache disabled".
+    """
+
+    def test_zero_maxsize_put_get_does_not_raise(self):
+        cache = _EmbeddingCache(maxsize=0, ttl=3600)
+        assert cache.enabled is False
+        cache.put("k", np.array([1.0], dtype=np.float32))  # must not raise
+        assert cache.get("k") is None
+        assert cache.stats["size"] == 0
+        assert cache.stats["evictions"] == 0
+        assert cache.stats["enabled"] is False
+
+    def test_negative_maxsize_is_disabled(self):
+        cache = _EmbeddingCache(maxsize=-5, ttl=3600)
+        assert cache.enabled is False
+        cache.put("k", np.array([1.0], dtype=np.float32))
+        assert cache.get("k") is None
+
+    def test_zero_ttl_is_disabled(self):
+        cache = _EmbeddingCache(maxsize=100, ttl=0)
+        assert cache.enabled is False
+        cache.put("k", np.array([1.0], dtype=np.float32))
+        assert cache.get("k") is None
+
+    def test_zero_maxsize_service_embed_does_not_raise(self):
+        """EmbeddingService with cache_max_entries=0 must still embed."""
+        svc = EmbeddingService(cache_max_entries=0)
+        assert svc._cache.enabled is False
+        # embed() goes through the cache path for every text; with caching
+        # disabled it must skip put() entirely (no StopIteration).
+        out = svc.embed(["hello world"]) if _model_available(svc) else None
+        if out is not None:
+            assert out.shape[0] == 1
 
 
 # ===========================================================================

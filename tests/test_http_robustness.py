@@ -293,3 +293,28 @@ class TestMalformedRequestNoCrash:
         req = urllib.request.Request(server["health_url"])
         resp = urllib.request.urlopen(req, timeout=5)
         assert resp.status == 200
+
+class TestNonLoopbackHostDetection:
+    """Tests for the startup warning heuristic (no auth + public bind).
+
+    The helper only decides whether to log a WARNING — it does not change
+    request handling or auth behavior.
+    """
+
+    def test_loopback_hosts_are_safe(self):
+        from guaipeca.mcp_server import _is_non_loopback_host
+
+        for host in ("127.0.0.1", "::1", "localhost", "LOCALHOST"):
+            assert _is_non_loopback_host(host) is False, host
+
+    def test_wildcard_bind_is_exposed(self):
+        from guaipeca.mcp_server import _is_non_loopback_host
+
+        for host in ("0.0.0.0", "::"):
+            assert _is_non_loopback_host(host) is True, host
+
+    def test_lan_and_hostname_binds_are_exposed(self):
+        from guaipeca.mcp_server import _is_non_loopback_host
+
+        for host in ("192.168.1.10", "10.0.0.5", "example.com", ""):
+            assert _is_non_loopback_host(host) is True, host
