@@ -39,6 +39,32 @@ from .search import Searcher
 
 logger = logging.getLogger(__name__)
 
+
+def _is_non_loopback_host(host: str) -> bool:
+    """Return True if ``host`` is a bind address that is not loopback-only.
+
+    Loopback addresses (127.0.0.0/8, ::1) and the hostname ``localhost`` are
+    treated as safe (not exposing). The wildcard/unspecified addresses
+    (0.0.0.0, ::) bind ALL interfaces and therefore DO expose the service and
+    return True. Non-IP hostnames (other than ``localhost``) are assumed to
+    expose the service.
+
+    Used only to decide whether to emit a startup security warning.
+    """
+    import ipaddress
+    h = (host or "").strip().lower()
+    if not h:
+        return True  # bind-all fallback — treat as exposed
+    if h in ("localhost", "ip6-localhost", "ip6-loopback"):
+        return False
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return True  # non-IP hostname — assume routable/exposed
+    # Wildcard/unspecified addresses (0.0.0.0, ::) bind ALL interfaces, so
+    # they expose the service. Only genuine loopback is considered safe.
+    return not ip.is_loopback
+
 # MCP protocol version
 MCP_VERSION = "2025-06-18"
 
@@ -340,6 +366,9 @@ class GuaipecaMCPServer:
             model_name=config.embedding.model,
             cache_dir=config.embedding.cache_dir,
             dimensions=config.embedding.dimensions,
+            preprocess=config.embedding.preprocess,
+            cache_ttl_seconds=config.embedding.cache_ttl_seconds,
+            cache_max_entries=config.embedding.cache_max_entries,
         )
 
         # Check if model is cached before starting
@@ -793,6 +822,21 @@ class GuaipecaMCPServer:
         auth_token = self.config.server.auth_token
         # Restrict CORS to non-wildcard when auth is enabled
         cors_origin = "*" if not auth_token else "null"
+
+        # Security nice-to-have: warn when exposed on a non-loopback interface
+        # without auth. Optional auth is intentional by design, so this is a
+        # warning only — it does not alter request handling.
+        if not auth_token and _is_non_loopback_host(host):
+            logger.warning(
+                "=" * 60 + "\n"
+                f"⚠️  UNAUTHENTICATED PUBLIC BIND: host={host!r}\n"
+                "   No auth_token is configured, so ALL endpoints are\n"
+                "   reachable WITHOUT authentication from any client that\n"
+                "   can reach this address.\n"
+                "   To require auth: set server.auth_token in the config.\n"
+                "   To restrict to this machine: bind host=127.0.0.1.\n"
+                + "=" * 60
+            )
 
         # Session management: each SSE connection gets a session with a message queue
         sessions: dict[str, MCPSession] = {}

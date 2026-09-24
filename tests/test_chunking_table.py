@@ -10,7 +10,9 @@ Tests cover:
 
 from __future__ import annotations
 
-from guaipeca.chunking import _split_paragraphs_aware, chunk_text
+from itertools import pairwise
+
+from guaipeca.chunking import _chunk_by_paragraph, _split_paragraphs_aware, chunk_text
 
 
 class TestTableAwareChunking:
@@ -125,3 +127,57 @@ class TestCodeFenceRegression:
         assert len(paras) == 2
         assert "| A | B |" in paras[0][0]  # table lines inside code block
         assert "After." in paras[1][0]
+
+class TestChunkOverlapOffset:
+    """Regression: overlap must be taken from the correct original offset.
+
+    Bug: ``current_original_len`` was only updated in the first (no-overlap)
+    branch, so once a chunk contained a previous chunk's overlap the length
+    never advanced. Overlap was then extracted from a stale, wrong position,
+    degrading retrieval at chunk boundaries — and produced chunks slightly
+    over ``max_size``.
+    """
+
+    @staticmethod
+    def _paras(n: int, width: int = 90) -> str:
+        return "\n\n".join(f"para-{i}-" + "x" * width for i in range(n))
+
+    def test_chunks_respect_max_size_with_overlap(self):
+        """No chunk may exceed max_size once overlap is in play."""
+        max_size, overlap = 400, 100
+        chunks = _chunk_by_paragraph(
+            self._paras(40), "f.md", max_size=max_size, overlap=overlap
+        )
+        assert len(chunks) > 3
+        for c in chunks:
+            assert len(c.text) <= max_size, f"chunk over max_size: {len(c.text)}"
+
+    def test_overlap_present_between_consecutive_chunks(self):
+        """Each consecutive pair should share overlapping content."""
+        overlap = 120
+        chunks = _chunk_by_paragraph(
+            self._paras(40), "f.md", max_size=420, overlap=overlap
+        )
+        assert len(chunks) > 3
+        for prev, nxt in pairwise(chunks):
+            # The tail of the previous chunk should reappear near the start
+            # of the next chunk (overlap carries content forward).
+            tail = prev.text[-overlap:].strip()
+            marker = tail[-40:].strip()
+            assert marker, "empty overlap marker"
+            assert marker in nxt.text, (
+                "expected overlap content from previous chunk in next chunk"
+            )
+
+    def test_offsets_are_monotonic_and_consistent(self):
+        """chunk offsets must strictly increase and track chunk lengths."""
+        chunks = _chunk_by_paragraph(
+            self._paras(30), "f.md", max_size=400, overlap=80
+        )
+        offsets = [c.char_offset for c in chunks]
+        assert offsets == sorted(offsets)
+        assert len(set(offsets)) == len(offsets)
+        # offset advances by (len - overlap) plus separators; must never move
+        # backwards and must not advance to/past the whole text.
+        for prev, nxt in pairwise(chunks):
+            assert nxt.char_offset > prev.char_offset

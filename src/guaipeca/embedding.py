@@ -39,10 +39,18 @@ class _EmbeddingCache:
         """
         Args:
             maxsize: Maximum number of entries (default 10000).
+                A value <= 0 disables caching entirely (see ``enabled``).
             ttl: Time-to-live in seconds (default 3600 = 1 hour).
+                A value <= 0 disables caching entirely; a TTL of 0 would make
+                every entry expire immediately, which is equivalent to no cache.
         """
         self.maxsize = maxsize
         self.ttl = ttl
+        # Zero/negative maxsize or ttl means "no cache": storing entries would
+        # either trigger an unbounded eviction loop (next(iter()) on an empty
+        # OrderedDict raises StopIteration) or make every read a guaranteed
+        # miss. Treat both as cache-disabled rather than crashing.
+        self.enabled = maxsize > 0 and ttl > 0
         self._cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self._timestamps: dict[str, float] = {}
         self._hits = 0
@@ -65,7 +73,7 @@ class _EmbeddingCache:
         Returns:
             Embedding array or None if not found/expired.
         """
-        if key not in self._cache:
+        if not self.enabled or key not in self._cache:
             self._misses += 1
             return None
 
@@ -88,6 +96,10 @@ class _EmbeddingCache:
             key: Cache key (text hash).
             value: Embedding array.
         """
+        # Caching disabled: don't store anything (would risk an eviction loop).
+        if not self.enabled:
+            return
+
         # Check memory pressure before adding
         if self._is_memory_pressure_high():
             # Evict more aggressively under memory pressure
@@ -164,6 +176,7 @@ class _EmbeddingCache:
             "evictions": self._evictions,
             "size": len(self._cache),
             "ttl_seconds": self.ttl,
+            "enabled": self.enabled,
         }
 
 
