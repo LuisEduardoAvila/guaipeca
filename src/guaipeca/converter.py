@@ -43,6 +43,13 @@ _BARE_SECTION_LABEL = re.compile(
     re.IGNORECASE,
 )
 
+# Conversion-cache format marker.  Bump this whenever the heading-detection
+# output changes, so cached markdown produced by an older converter is
+# ignored instead of silently reused.  The cache key is the source file's
+# content hash; without this marker, re-uploading unchanged bytes after a
+# converter fix would keep serving the stale conversion.
+_CONVERTER_CACHE_MARKER = "converter-cache-v2"
+
 # ---------------------------------------------------------------------------
 # Heading-tree validation thresholds
 #
@@ -161,11 +168,16 @@ class Converter:
         return h.hexdigest()
 
     def _cache_path(self, file_path: str, file_hash: str) -> Path | None:
-        """Get cache file path for a given source file."""
+        """Get cache file path for a given source file.
+
+        The name embeds both the source content hash and a converter-format
+        marker, so a change to the heading-detection output (marker bump)
+        automatically bypasses cached markdown from an older converter.
+        """
         if not self.cache_dir:
             return None
         safe_name = Path(file_path).stem.replace("/", "_").replace("\\", "_")
-        return self.cache_dir / f"{safe_name}_{file_hash[:16]}.md"
+        return self.cache_dir / f"{safe_name}_{file_hash[:16]}_{_CONVERTER_CACHE_MARKER}.md"
 
     def _convert_pdf_with_headings(self, file_path: str) -> str:
         """Convert PDF using pymupdf with font-based heading detection.
@@ -289,19 +301,29 @@ class Converter:
                 #       The number's size wins for level mapping (it is the
                 #       chapter level), and the label is kept in the text.
                 heading_parts: list[str] = []  # accumulator for stitched heading
-                heading_size: float | None = None  # size of the current heading
+                heading_size: float | None = None  # size of the most recent line
+                # Size used to map the logical heading to a markdown level.
+                # Normally equal to heading_size, but when a bare chapter label
+                # is merged with a differently-sized title (case b), the label's
+                # size is retained here so the chapter keeps its level (H2)
+                # instead of being demoted to the title's level (H3).  That
+                # keeps the chunker's H2 section boundaries intact.
+                heading_level_size: float | None = None
                 heading_is_label = False  # current heading is a bare label
 
                 def _flush_heading() -> None:
                     """Emit and reset the pending heading accumulator."""
-                    nonlocal heading_parts, heading_size, heading_is_label
+                    nonlocal heading_parts, heading_size, heading_level_size, heading_is_label
                     if heading_parts:
                         _emit_heading(
-                            heading_parts, heading_size, size_to_level,
+                            heading_parts,
+                            heading_level_size if heading_level_size is not None else heading_size,
+                            size_to_level,
                             output_lines, emitted_headings,
                         )
                     heading_parts = []
                     heading_size = None
+                    heading_level_size = None
                     heading_is_label = False
 
                 for line in block.get("lines", []):
@@ -321,14 +343,17 @@ class Converter:
                             # Start a new heading.
                             heading_parts = [line_text]
                             heading_size = max_size
+                            heading_level_size = max_size
                             heading_is_label = bool(_BARE_SECTION_LABEL.match(line_text))
                         elif heading_is_label and max_size != heading_size:
                             # Case (b): bare label followed by the title at a
                             # different size — merge, keep the label's level.
-                            # Adopt the title's size so subsequent lines (e.g.
-                            # the wrapped tail of a long title) accumulate via
-                            # case (a) instead of being flushed as a new
-                            # heading.  The level still comes from the label.
+                            # Adopt the title's size for the running accumulator
+                            # so subsequent lines (e.g. the wrapped tail of a
+                            # long title) accumulate via case (a) instead of
+                            # being flushed as a new heading.  heading_level_size
+                            # still holds the label's size, so the emitted
+                            # heading keeps the chapter's level.
                             heading_parts.append(line_text)
                             heading_is_label = False
                             heading_size = max_size
@@ -340,6 +365,7 @@ class Converter:
                             _flush_heading()
                             heading_parts = [line_text]
                             heading_size = max_size
+                            heading_level_size = max_size
                             heading_is_label = bool(_BARE_SECTION_LABEL.match(line_text))
                     else:
                         # Body-sized line.  Flush any pending heading.

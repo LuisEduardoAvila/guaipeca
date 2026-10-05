@@ -245,3 +245,31 @@ class TestChapterNumberTitleMerge:
         # Chapter 10's title must be attached to its number.
         ch10 = [h for h in headings if h[1].startswith("10 ") and "Integrating Cloud EPM" in h[1]]
         assert len(ch10) == 1, f"expected merged '10 Integrating Cloud EPM...', got {ch10}"
+
+    def test_merged_chapter_keeps_label_level(self, converter):
+        """A merged chapter label must keep the label's level, not the title's.
+
+        Regression: the case-(b) merge used to adopt the title's font size as
+        the heading size, so a 30pt chapter number + 24pt title emitted at the
+        title's level (H3) instead of the chapter level (H2).  The chunker
+        splits sections only on H2 headings, so demoting the chapter to H3
+        collapsed the entire book into a single H2 section.  The merged
+        heading must stay at the number's level.
+        """
+        import os
+
+        import pytest
+
+        if not os.path.exists(_FCCS_PDF):
+            pytest.skip("real FCCS calibration PDF not present")
+
+        md = converter._convert_pdf_with_headings(_FCCS_PDF)
+        headings = _extract_headings(md)
+
+        chapters = [h for h in headings if h[1].startswith("5 ") and "Managing Security" in h[1]]
+        assert len(chapters) == 1, f"expected merged '5 Managing Security', got {chapters}"
+        level = chapters[0][0]
+        assert level == 2, (
+            f"merged chapter number+title must keep the label's level (H2), got H{level}: "
+            f"{chapters[0]!r}"
+        )
