@@ -305,3 +305,51 @@ class TestHyphenLineBreak:
         # No split variant must remain.
         split = [h for h in headings if "Decision- Making" in h[1] or h[1].endswith("Decision-")]
         assert split == [], f"split hyphen heading still present: {split}"
+
+
+class TestBodyLineHashEscape:
+    """Literal '#' body lines (code/ASCII) must not become headings.
+
+    Oracle scripting guides embed shell/SQL comments such as '# befExport.py'
+    or ASClI table rows starting with '#'.  Emitted verbatim they become ATX
+    headings and the chunker mistakes them for real section boundaries.
+    """
+
+    def test_escape_helper(self):
+        from guaipeca.converter import _escape_heading_marks
+
+        assert _escape_heading_marks("# befExport.py") == r"\# befExport.py"
+        assert _escape_heading_marks("## section") == r"\## section"
+        assert _escape_heading_marks("###### deep") == r"\###### deep"
+        # Mid-line hashes and non-heading '#' runs are untouched.
+        assert _escape_heading_marks("mid # hash stays") == "mid # hash stays"
+        assert _escape_heading_marks("#hashtag") == "#hashtag"
+
+    def test_bracket_hash_body_line_is_not_a_heading(self, converter, tmp_path):
+        """A body line beginning with '# ' must not be emitted as a heading."""
+        import pymupdf
+
+        doc = pymupdf.open()
+        page1 = doc.new_page()
+        page1.insert_text((72, 80), "Main Title", fontsize=24)
+        page1.insert_text((72, 120), "Section One", fontsize=18)
+        page2 = doc.new_page()
+        page2.insert_text((72, 80), "Body paragraph describing the tool.", fontsize=11)
+        page2.insert_text((72, 100), "# befExport.py", fontsize=11)
+        page2.insert_text((72, 120), "More body text follows.", fontsize=11)
+        pdf = tmp_path / "hash-body.pdf"
+        doc.save(str(pdf))
+        doc.close()
+
+        md = converter._convert_pdf_with_headings(str(pdf))
+        headings = _extract_headings(md)
+
+        # The comment line must NOT appear as a heading...
+        assert not any("befExport" in text for _, text in headings), (
+            f"'# befExport.py' was promoted to a heading: {headings}"
+        )
+        # ...but is preserved in the body, escaped.
+        assert r"\# befExport.py" in md, md
+        # Sanity: the real headings survive.
+        assert (1, "Main Title") in headings
+        assert (2, "Section One") in headings

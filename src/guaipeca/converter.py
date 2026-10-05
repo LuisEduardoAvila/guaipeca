@@ -48,7 +48,7 @@ _BARE_SECTION_LABEL = re.compile(
 # ignored instead of silently reused.  The cache key is the source file's
 # content hash; without this marker, re-uploading unchanged bytes after a
 # converter fix would keep serving the stale conversion.
-_CONVERTER_CACHE_MARKER = "converter-cache-v2"
+_CONVERTER_CACHE_MARKER = "converter-cache-v3"
 
 # ---------------------------------------------------------------------------
 # Heading-tree validation thresholds
@@ -370,7 +370,7 @@ class Converter:
                     else:
                         # Body-sized line.  Flush any pending heading.
                         _flush_heading()
-                        output_lines.append(line_text)
+                        output_lines.append(_escape_heading_marks(line_text))
 
                 # End of block: flush any pending heading, then apply the
                 # cross-block label bridge for double-digit chapter numbers.
@@ -523,6 +523,22 @@ def _join_hyphenated(text: str) -> str:
     this collapses the spurious whitespace so the heading reads as one word.
     """
     return re.sub(r"(?<=[A-Za-z])-\s+(?=[A-Za-z])", "-", text)
+
+
+def _escape_heading_marks(text: str) -> str:
+    """Backslash-escape leading '#' markers on a non-heading (body) line.
+
+    Code samples and ASCII tables in Oracle PDFs frequently contain literal
+    '#' characters - shell/SQL comments (e.g. "# befExport.py"), CSV headers
+    ("# Type of Operation,Artifact Name,..."), separator rules.  Emitted
+    verbatim into the markdown these turn into ATX headings, which the
+    chunker then mistakes for real section boundaries, corrupting
+    heading_path, section_id, get_toc and section_mode.
+
+    Only a genuine markdown heading (1-6 '#' followed by whitespace) is
+    escaped; a mid-line '#' is left untouched.
+    """
+    return re.sub(r"^(#{1,6})(\s)", r"\\\1\2", text)
 
 
 def _emit_heading(
