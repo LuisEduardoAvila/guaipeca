@@ -514,6 +514,17 @@ def _bridge_label(
             break
 
 
+def _join_hyphenated(text: str) -> str:
+    """Rejoin a title that was wrapped at a hyphen during PDF typesetting.
+
+    Oracle PDFs sometimes break a hyphenated word or compound across lines,
+    e.g. "Decision-" / "Making" or "Server-" / "Side Groovy".  When the
+    stitcher joins the physical lines it leaves a hyphen followed by a space;
+    this collapses the spurious whitespace so the heading reads as one word.
+    """
+    return re.sub(r"(?<=[A-Za-z])-\s+(?=[A-Za-z])", "-", text)
+
+
 def _emit_heading(
     parts: list[str],
     size: float,
@@ -528,8 +539,9 @@ def _emit_heading(
     the heading in *emitted_headings* for later validation.
 
     Duplicate consecutive headings (same level + text) are suppressed.
+    A title wrapped at a hyphen ("Decision- Making") is joined back together.
     """
-    text = " ".join(parts)
+    text = _join_hyphenated(" ".join(parts))
     level = size_to_level[size]
     prefix = "#" * level
     marker = f"{prefix} {text}"

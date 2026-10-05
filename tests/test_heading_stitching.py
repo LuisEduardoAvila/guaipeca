@@ -273,3 +273,35 @@ class TestChapterNumberTitleMerge:
             f"merged chapter number+title must keep the label's level (H2), got H{level}: "
             f"{chapters[0]!r}"
         )
+
+
+class TestHyphenLineBreak:
+    """A title wrapped at a hyphen must be rejoined into a single heading."""
+
+    def test_join_hyphenated_helper(self):
+        from guaipeca.converter import _join_hyphenated
+
+        # Wrapped hyphenated words are rejoined...
+        assert _join_hyphenated("Decision- Making") == "Decision-Making"
+        assert _join_hyphenated("Server- Side Groovy") == "Server-Side Groovy"
+        # ...but an intentional spaced hyphen is preserved.
+        assert _join_hyphenated("Consolidation - Close") == "Consolidation - Close"
+        assert _join_hyphenated("End of sentence - Start") == "End of sentence - Start"
+
+    def test_wrapped_hyphen_heading_is_single(self, converter):
+        """A heading broken as 'Decision-\\nMaking' is emitted as one heading."""
+        import os
+
+        import pytest
+
+        if not os.path.exists(_FCCS_PDF):
+            pytest.skip("real FCCS calibration PDF not present")
+
+        md = converter._convert_pdf_with_headings(_FCCS_PDF)
+        headings = _extract_headings(md)
+
+        joined = [h for h in headings if "Decision-Making" in h[1]]
+        assert joined, "expected a rejoined 'Decision-Making' heading"
+        # No split variant must remain.
+        split = [h for h in headings if "Decision- Making" in h[1] or h[1].endswith("Decision-")]
+        assert split == [], f"split hyphen heading still present: {split}"
