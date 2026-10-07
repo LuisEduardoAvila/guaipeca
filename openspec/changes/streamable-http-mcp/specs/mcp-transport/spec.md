@@ -107,7 +107,9 @@ Where `<negotiated>` is the highest protocol version the server supports that is
 ##### SC-003: Unknown session ID
 **Given** no session with ID `xyz-999` exists
 **When** the client sends `POST /mcp` with header `Mcp-Session-Id: xyz-999` and a JSON-RPC request
-**Then** the server responds with HTTP 400 with the same error as SC-002
+**Then** the server responds with HTTP 404 and body `{"jsonrpc":"2.0","id":<id>,"error":{"code":-32000,"message":"Session not found"}}`
+
+**Rationale:** A present-but-unrecognized `Mcp-Session-Id` denotes an expired or restarted session. The MCP Streamable HTTP spec requires `404 Not Found` here so clients can detect expiry and re-`initialize`; some clients (e.g. opencode) key their reconnect solely on the 404 status. Responding `400` makes them retry the dead session indefinitely.
 
 ##### SC-004: initialize does not require session ID
 **Given** no session exists
