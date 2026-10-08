@@ -1208,13 +1208,21 @@ class GuaipecaMCPServer:
 
                     with sessions_lock:
                         if session_id_header not in sessions:
-                            self.send_response(400)
+                            # A present-but-unrecognized session id means the
+                            # session is gone (e.g. the server restarted). Per
+                            # the MCP Streamable HTTP spec the server MUST reply
+                            # 404 so clients can detect expiry and re-initialize.
+                            # Returning 400 here left clients (e.g. opencode)
+                            # retrying a dead session forever, since they key
+                            # their reconnect on the 404 status, not on a
+                            # -32000 JSON-RPC body.
+                            self.send_response(404)
                             self.send_header("Content-Type", "application/json")
                             self.send_header("Access-Control-Allow-Origin", cors_origin)
                             resp_body = json.dumps({
                                 "jsonrpc": "2.0",
                                 "id": req_id,
-                                "error": {"code": -32000, "message": "Missing or invalid Mcp-Session-Id header"},
+                                "error": {"code": -32000, "message": "Session not found"},
                             }).encode("utf-8")
                             self.send_header("Content-Length", str(len(resp_body)))
                             self.end_headers()

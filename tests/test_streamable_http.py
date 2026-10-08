@@ -602,12 +602,17 @@ class TestSessionValidation:
         assert resp["error"]["code"] == -32000
 
     def test_unknown_session_id(self, http_server):
-        """POST /mcp with unknown Mcp-Session-Id → 400."""
+        """POST /mcp with unknown Mcp-Session-Id → 404 (spec: session expired).
+
+        A present-but-unrecognized session id means the session is gone. The
+        spec requires 404 so clients can detect expiry and re-initialize;
+        returning 400 leaves them retrying a dead session forever.
+        """
         body = {"jsonrpc": "2.0", "id": 6, "method": "tools/list"}
 
         status, resp, headers = _post_mcp(http_server["mcp_url"], body, session_id="nonexistent-uuid-12345")
 
-        assert status == 400
+        assert status == 404
         assert resp["error"]["code"] == -32000
 
 
@@ -628,10 +633,10 @@ class TestDeleteSession:
         assert status == 200
         assert resp["status"] == "session terminated"
 
-        # Verify session is gone — subsequent use should fail
+        # Verify session is gone — subsequent use should report expiry (404)
         body = {"jsonrpc": "2.0", "id": 7, "method": "tools/list"}
         status2, resp2, _ = _post_mcp(http_server["mcp_url"], body, session_id=session_id)
-        assert status2 == 400
+        assert status2 == 404
 
     def test_delete_unknown_session(self, http_server):
         """DELETE /mcp with unknown session → 404."""
