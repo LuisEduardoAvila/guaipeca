@@ -36,6 +36,7 @@ from .config import GuaipecaConfig
 from .converter import Converter
 from .embedding import EmbeddingService
 from .search import Searcher
+from .uploads import delete_upload, list_upload_folders, save_upload
 
 logger = logging.getLogger(__name__)
 
@@ -566,31 +567,16 @@ class GuaipecaMCPServer:
         }
 
     def _list_upload_folders(self) -> dict:
-        """List corpora that accept file uploads."""
-        allowed = self.config.upload.allow
-        folders = []
-        for corpus in self.config.corpora:
-            if corpus.name in allowed:
-                folders.append({
-                    "name": corpus.name,
-                    "path": corpus.path,
-                    "topic": corpus.topic,
-                    "extensions": corpus.extensions,
-                })
-        return {
-            "folders": folders,
-            "total": len(folders),
-            "allowed_extensions": self.config.upload.allowed_extensions,
-            "max_file_size": self.config.upload.max_file_size,
-        }
+        """List corpora that accept file uploads (delegates to shared core)."""
+        return list_upload_folders(self.config)
 
     def _handle_upload(
         self, corpus_name: str, filename: str, content_b64: str, do_index: bool
     ) -> dict:
         """Handle a file upload to a corpus.
 
-        Validates the corpus is upload-enabled, checks extension and size,
-        saves the file, and optionally triggers indexing.
+        Decodes the base64 payload (MCP wire format) and delegates validation,
+        persistence and optional indexing to the shared uploads core.
 
         Args:
             corpus_name: Target corpus name.
@@ -603,138 +589,23 @@ class GuaipecaMCPServer:
         """
         import base64
 
-        # Validate corpus exists and is upload-enabled
-        if corpus_name not in self.config.upload.allow:
-            return {"error": f"Corpus '{corpus_name}' does not accept uploads"}
-
-        corpus = self.config.get_corpus(corpus_name)
-        if corpus is None:
-            return {"error": f"Corpus not found: {corpus_name}"}
-
-        # Validate filename
-        filename = os.path.basename(filename)  # strip any path components
-        if not filename:
-            return {"error": "Invalid filename"}
-
-        ext = Path(filename).suffix.lower()
-        if ext not in self.config.upload.allowed_extensions:
-            return {
-                "error": f"Extension '{ext}' not allowed. Permitted: {self.config.upload.allowed_extensions}"
-            }
-
         # Decode content
         try:
             content_bytes = base64.b64decode(content_b64)
         except Exception:
             return {"error": "Invalid base64 content"}
 
-        # Check size limit
-        if len(content_bytes) > self.config.upload.max_file_size:
-            max_mb = self.config.upload.max_file_size / (1024 * 1024)
-            return {"error": f"File too large ({len(content_bytes)} bytes, max {max_mb:.0f}MB)"}
-
-        # Save to corpus directory
-        corpus_path = Path(corpus.path)
-        corpus_path.mkdir(parents=True, exist_ok=True)
-        dest = corpus_path / filename
-
-        # Write atomically (temp + rename)
-        import tempfile
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(corpus_path), suffix=".tmp")
-        try:
-            with os.fdopen(tmp_fd, "wb") as f:
-                f.write(content_bytes)
-                f.flush()
-                os.fsync(f.fileno())
-            os.rename(tmp_path, str(dest))
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            return {"error": f"Failed to save file: {filename}"}
-
-        logger.info(f"Uploaded {filename} to corpus '{corpus_name}' ({len(content_bytes)} bytes)")
-
-        result = {
-            "corpus": corpus_name,
-            "filename": filename,
-            "path": str(dest),
-            "size_bytes": len(content_bytes),
-            "saved": True,
-        }
-
-        # Optionally index the corpus
-        if do_index:
-            index_result = self.searcher.index_corpus(corpus_name=corpus_name)
-            result["index"] = index_result
-            result["indexed"] = True
-        else:
-            result["indexed"] = False
-
-        return result
+        return save_upload(
+            self.config, corpus_name, filename, content_bytes, do_index, self.searcher
+        )
 
     def _handle_delete(
         self, corpus_name: str, filename: str, do_index: bool
     ) -> dict:
-        """Handle a file deletion from a corpus.
-
-        Validates the corpus is upload-enabled, checks the file exists,
-        deletes it, and optionally triggers re-indexing.
-        """
-        if corpus_name not in self.config.upload.allow:
-            return {"error": f"Corpus '{corpus_name}' does not accept uploads (delete not allowed)"}
-
-        corpus = self.config.get_corpus(corpus_name)
-        if corpus is None:
-            return {"error": f"Corpus not found: {corpus_name}"}
-
-        filename = os.path.basename(filename)
-        if not filename:
-            return {"error": "Invalid filename"}
-
-        corpus_path = Path(corpus.path)
-        file_path = corpus_path / filename
-
-        try:
-            real_path = file_path.resolve()
-            real_corpus = corpus_path.resolve()
-            if not str(real_path).startswith(str(real_corpus)):
-                return {"error": "Invalid filename (path traversal detected)"}
-        except Exception:
-            return {"error": "Invalid filename"}
-
-        if not file_path.exists():
-            return {"error": f"File not found: {filename}"}
-
-        if not file_path.is_file():
-            return {"error": f"Not a file: {filename}"}
-
-        try:
-            file_size = file_path.stat().st_size
-            os.unlink(str(file_path))
-        except OSError as e:
-            logger.error(f"Failed to delete {file_path}: {e}")
-            return {"error": f"Failed to delete file: {filename}"}
-
-        logger.info(f"Deleted {filename} from corpus '{corpus_name}' ({file_size} bytes)")
-
-        result = {
-            "corpus": corpus_name,
-            "filename": filename,
-            "path": str(file_path),
-            "size_bytes": file_size,
-            "deleted": True,
-        }
-
-        if do_index:
-            index_result = self.searcher.index_corpus(corpus_name=corpus_name)
-            result["index"] = index_result
-            result["indexed"] = True
-        else:
-            result["indexed"] = False
-
-        return result
+        """Handle a file deletion from a corpus (delegates to shared core)."""
+        return delete_upload(
+            self.config, corpus_name, filename, do_index, self.searcher
+        )
 
     # ---- shared JSON-RPC processing ----
 

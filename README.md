@@ -277,9 +277,25 @@ guaipeca --check-model                 # Check/download embedding model
 guaipeca index [corpus] [--force]      # Index corpora
 guaipeca search "query" [--top-k N]    # Search
 guaipeca search "query" --hybrid       # Hybrid search (BM25 + FAISS)
+guaipeca search "query" --return-mode auto --max-chars 12000   # Auto mode
+guaipeca search "query" --section-mode --section-filter "Chapter 3"
 guaipeca status                        # Show stats
+guaipeca get-chunk <chunk_id>          # Retrieve full chunk text
+guaipeca get-document --corpus C --path /abs/file.md   # Retrieve document text
+guaipeca list-documents [corpus]       # List indexed documents
+guaipeca list-folders                  # List upload-enabled corpora
+guaipeca get-toc --corpus C [--document /abs/file.md]  # Table of contents
+guaipeca upload --corpus C <file>      # Upload a file and index it
+guaipeca delete --corpus C <filename>  # Delete a file and re-index
 guaipeca serve [--transport both] [--port 8090]  # Start MCP server
 ```
+
+The CLI mirrors the MCP tools one-for-one (except `serve`, which is
+CLI-only). Read/upload/delete commands print the same JSON payloads the MCP
+server returns. `guaipeca search` accepts the same knobs as the MCP `search`
+tool: `--return-mode`, `--max-chars`, `--section-mode`, and `--section-filter`
+(in addition to `--top-k`, `--corpora`, and `--hybrid`). A parity test
+(`tests/test_cli_mcp_parity.py`) fails if the two surfaces drift apart.
 
 ## Running as a systemd Service
 
