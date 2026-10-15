@@ -231,7 +231,9 @@ class TestConfigHybrid:
     def test_search_config_defaults(self):
         """SearchConfig should have safe defaults."""
         cfg = SearchConfig()
-        assert cfg.hybrid is False
+        # Hybrid is on by default: measured better or equal on recall@5, hit@1
+        # and MRR over a 25-query golden set (tools/eval_retrieval.py).
+        assert cfg.hybrid is True
         assert cfg.bm25_weight == 1.0
         assert cfg.dense_weight == 1.0
         assert cfg.rrf_k == 60

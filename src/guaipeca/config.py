@@ -74,7 +74,10 @@ class IndexingConfig:
 @dataclass
 class SearchConfig:
     """Search configuration for hybrid BM25 + dense search."""
-    hybrid: bool = False          # Enable BM25 hybrid search (default: false for backward compat)
+    # Enable BM25 hybrid search. Default true: measured better or equal on every
+    # metric (recall@5, hit@1, MRR) across a 25-query golden set — see
+    # tools/eval_retrieval.py. Set false to force dense-only.
+    hybrid: bool = True
     bm25_weight: float = 1.0     # Weight for BM25 scores in RRF fusion
     dense_weight: float = 1.0   # Weight for dense (FAISS) scores in RRF fusion
     rrf_k: int = 60              # RRF constant (standard value from literature)

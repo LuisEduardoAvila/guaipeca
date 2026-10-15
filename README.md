@@ -107,7 +107,7 @@ upload:
 
 # Search configuration (optional — all values have safe defaults)
 search:
-  hybrid: false              # Enable BM25 + FAISS hybrid search (default: false)
+  hybrid: true               # Enable BM25 + FAISS hybrid search (default: true; see tools/eval_retrieval.py)
   bm25_weight: 1.0           # BM25 contribution weight in RRF fusion
   dense_weight: 1.0          # Dense (FAISS) contribution weight in RRF fusion
   rrf_k: 60                  # RRF constant (higher = smoother ranking)

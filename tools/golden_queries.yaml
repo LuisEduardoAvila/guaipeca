@@ -1,0 +1,179 @@
+# Golden query set for Guaipeca retrieval eval.
+#
+# Scoring: a query is a HIT if ANY `expect` substring appears in the top-k
+# results (matched against source_path / location / filename). MRR uses the
+# rank of the first correct result.
+#
+# HARDNESS DESIGN (v3)
+# -------------------
+# v1 was all-1.000 because queries echoed their target heading. This set is
+# built so dense and hybrid can DIVERGE:
+#
+#   kind: lexical   -> jargon/keywords present verbatim in the section body,
+#                      no vocabulary shared with the heading. BM25-favoured.
+#   kind: semantic  -> paraphrase with no shared vocabulary. Dense-favoured.
+#   kind: distractor-> a strong near-miss section exists (right words, wrong
+#                      topic). Tests precision, not recall.
+#
+# RESOLVED PROBES (v3): the two previously-unscored probes were investigated
+# with targeted sub-queries. Results were ambiguous (e.g. "move data between
+# systems on a schedule" ranks Task Manager #1 and Jobs #4 with no single
+# defensible target), so they are recorded as `kind: ambiguous` with the
+# observed top hit noted, rather than asserting a target we cannot justify.
+#
+# Corpus refs:
+#   A = EPM-INFORMATION-DEVELOPMENT-TEAM-E93973-628A1C2A.pdf  (Administering FCC)
+#   B = EPM-INFORMATION-DEVELOPMENT-TEAM-E93999-628A8A5A.pdf  (Working with FCC)
+#   C = GUID-C284097E-4140-40A1-8E40-22E22B4B1C50.pdf         (Smart View)
+
+queries:
+  # =====================================================================
+  # LEXICAL — target words in the section body, not the heading.
+  # =====================================================================
+  - query: "how do I set up single sign-on so users authenticate once"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93973-628A1C2A.pdf"]
+    notes: "kind:lexical — SSO under 5 Managing Security"
+
+  - query: "scheduling a nightly process that runs in the background"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93973-628A1C2A.pdf"]
+    notes: "kind:lexical — 16 Managing Jobs"
+
+  - query: "restricting which combinations of members are allowed in a form"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93973-628A1C2A.pdf"]
+    notes: "kind:lexical — 18 Defining Valid Intersections"
+
+  - query: "locking a period so nobody can post adjustments to it"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93999-628A8A5A.pdf"]
+    notes: "kind:lexical — densest known miss; B 12 Reviewing and Approving Data"
+
+  - query: "MDX query syntax for pulling a custom slice of data"
+    corpus: epm-docs
+    expect: ["GUID-C284097E-4140-40A1-8E40-22E22B4B1C50.pdf"]
+    notes: "kind:lexical — C 22 Query Designer and MDX Queries"
+
+  - query: "troubleshooting tool that checks connectivity problems"
+    corpus: epm-docs
+    expect: ["GUID-C284097E-4140-40A1-8E40-22E22B4B1C50.pdf"]
+    notes: "kind:lexical — C 30 Smart View Diagnostics and Health Check"
+
+  - query: "machine learning predictions about future performance"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93973-628A1C2A.pdf"]
+    notes: "kind:lexical — 12 Configuring IPM Insights / C 19 IPM"
+
+  # =====================================================================
+  # SEMANTIC — paraphrases, no shared vocabulary. The real signal.
+  # =====================================================================
+  - query: "what happens to the numbers when child entities roll up into the parent"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93973-628A1C2A.pdf"]
+    notes: "kind:semantic — aggregation/consolidation"
+
+  - query: "giving a colleague permission to only look at one department's figures"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93973-628A1C2A.pdf"]
+    notes: "kind:semantic — security/access classes"
+
+  - query: "I need to undo a change someone made last week"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93973-628A1C2A.pdf", "EPM-INFORMATION-DEVELOPMENT-TEAM-E93999-628A8A5A.pdf"]
+    notes: "kind:semantic — audit trail (known rank-5 in all modes)"
+
+  - query: "why does my spreadsheet pull the wrong period's data"
+    corpus: epm-docs
+    expect: ["GUID-C284097E-4140-40A1-8E40-22E22B4B1C50.pdf"]
+    notes: "kind:semantic — Smart View POV/connection"
+
+  - query: "how do I make a chart of the results for management"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93973-628A1C2A.pdf", "EPM-INFORMATION-DEVELOPMENT-TEAM-E93999-628A8A5A.pdf"]
+    notes: "kind:semantic — dashboards"
+
+  - query: "the system is slow when many people use it at once, how do I investigate"
+    corpus: epm-docs
+    expect: ["GUID-C284097E-4140-40A1-8E40-22E22B4B1C50.pdf"]
+    notes: "kind:semantic — diagnostics/health check"
+
+  - query: "reviewer signs off on submitted numbers before they are final"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93999-628A8A5A.pdf"]
+    notes: "kind:semantic — B 12 Reviewing and Approving Data"
+
+  - query: "chain of reviewers from analyst up to finance director"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93973-628A1C2A.pdf"]
+    notes: "kind:semantic — 24 Managing Approval Unit Hierarchies"
+
+  - query: "entering a number into a cell on a grid layout"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93999-628A8A5A.pdf"]
+    notes: "kind:semantic — B 4 Entering Data in Forms"
+
+  - query: "grouping several reports together into a collection"
+    corpus: epm-docs
+    expect: ["GUID-C284097E-4140-40A1-8E40-22E22B4B1C50.pdf"]
+    notes: "kind:semantic — C 11 Books (known hard; top hit is Supplemental Data)"
+
+  - query: "extra details collected outside the main ledger"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93973-628A1C2A.pdf"]
+    notes: "kind:semantic — 28 Managing Supplemental Data (known hard)"
+
+  - query: "designing data entry screens for users"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93973-628A1C2A.pdf"]
+    notes: "kind:semantic — 19 Managing Forms (known hard)"
+
+  # =====================================================================
+  # DISTRACTOR — near-miss sections exist. Tests precision.
+  # =====================================================================
+  - query: "defining which users can access the application"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93973-628A1C2A.pdf"]
+    notes: "kind:distractor — Security vs Applications vs Smart View Options"
+
+  - query: "working with journals"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93999-628A8A5A.pdf"]
+    notes: "kind:distractor — 4 journal sections across A and B"
+
+  - query: "managing tasks"
+    corpus: epm-docs
+    expect: ["EPM-INFORMATION-DEVELOPMENT-TEAM-E93973-628A1C2A.pdf"]
+    notes: "kind:distractor — Task Manager vs Task Lists"
+
+  # =====================================================================
+  # CROSS-CORPUS (workspace-docs)
+  # =====================================================================
+  - query: "restoring a backup after a disk failure on the pi"
+    corpus: workspace-docs
+    expect: ["kopia-restore.md", "troubleshooting-openclaw-with-pi.md"]
+    notes: "kind:semantic"
+
+  - query: "how search engines are quarantined after repeated errors"
+    corpus: workspace-docs
+    expect: ["searxng-skill-design.md"]
+    notes: "kind:lexical — suspension policy"
+
+  - query: "why was a hybrid chunking approach chosen over fixed windows"
+    corpus: workspace-docs
+    expect: ["fmem-architecture-v3.2.0.md", "ARCHITECTURE_REVIEW.md"]
+    notes: "kind:semantic"
+
+  # =====================================================================
+  # AMBIGUOUS — probes investigated in v3; no defensible single target.
+  # Recorded for tracking, excluded from scoring.
+  # =====================================================================
+  - query: "how do I move data between systems on a schedule"
+    corpus: epm-docs
+    expect: []
+    notes: "kind:ambiguous — observed #1 Task Manager, #4 Managing Jobs; no single correct target"
+
+  - query: "what is the process for closing the books at month end"
+    corpus: epm-docs
+    expect: []
+    notes: "kind:ambiguous — observed #1 Creating FCC Application, #2 Task Manager; spread across sections"
