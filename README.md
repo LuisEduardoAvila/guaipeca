@@ -94,7 +94,7 @@ chunking:
   split_on_headings: true
 
 server:
-  transport: both  # stdio | http | both
+  transport: both  # stdio | http | both (see Transports below)
   port: 8090
   host: 127.0.0.1  # Use 0.0.0.0 for network access
   # auth_token: "your-secret-token"  # Optional: require Bearer token auth
@@ -113,6 +113,23 @@ search:
   rrf_k: 60                  # RRF constant (higher = smoother ranking)
   max_chars: 8000            # Threshold for auto return_mode (total result chars)
 ```
+
+### Transports
+
+`server.transport` accepts three values:
+
+| Value | Behaviour |
+|-------|-----------|
+| `stdio` | MCP over stdin/stdout. For local clients that launch Guaipeca as a subprocess. |
+| `http` | MCP over Streamable HTTP (`POST /mcp`) plus the non-MCP endpoints (`/health`, `/tools`, `/download/...`, `DELETE /documents`). For a daemon serving the network. |
+| `both` (default) | stdio when launched as a subprocess, HTTP when launched as a daemon. This is **not** two simultaneous listeners — the MCP SDK runs one server per transport, so `both` picks one based on how the process was started. |
+
+`sse` is no longer a valid value. The legacy `/sse` + `/messages` transport was
+removed in the MCP SDK migration; `transport: http` now serves `POST /mcp` for
+both protocol eras (the older session-based handshake and the newer stateless
+requests), so there is nothing left for a separate SSE setting to select. A
+config still set to `transport: sse` fails validation with an error pointing at
+`http`.
 
 ## Embedding Models
 

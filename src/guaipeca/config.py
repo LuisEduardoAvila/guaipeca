@@ -161,6 +161,9 @@ class UploadConfig:
 @dataclass
 class ServerConfig:
     """MCP server configuration."""
+    # "both" does NOT run two listeners: it means stdio when launched as a
+    # subprocess, HTTP when launched as a daemon (the SDK runs one server per
+    # transport). "sse" was removed in the MCP SDK migration — use "http".
     transport: str = "both"  # stdio | http | both
     port: int = 8090
     host: str = "127.0.0.1"  # P1-5: default to localhost for security
@@ -332,6 +335,17 @@ class GuaipecaConfig:
             raise ValueError(f"server.auth_token must be a string or null, got: {type(self.server.auth_token).__name__}")
         if not isinstance(self.server.max_body_size, int) or self.server.max_body_size < 1:
             raise ValueError(f"server.max_body_size must be a positive integer, got: {self.server.max_body_size!r}")
+        if self.server.transport == "sse":
+            raise ValueError(
+                "server.transport is 'sse', but the legacy SSE transport was removed in the "
+                "MCP SDK migration. Use 'http' instead: it serves POST /mcp for both protocol "
+                "eras. Valid values: 'stdio', 'http', 'both'."
+            )
+        if self.server.transport not in ("stdio", "http", "both"):
+            raise ValueError(
+                f"server.transport must be one of 'stdio', 'http', 'both', got: "
+                f"{self.server.transport!r}"
+            )
         if self.server.allowed_origins is not None and (
             not isinstance(self.server.allowed_origins, list)
             or not all(isinstance(o, str) for o in self.server.allowed_origins)
