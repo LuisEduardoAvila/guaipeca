@@ -112,7 +112,11 @@ def save_upload(
             f.write(content_bytes)
             f.flush()
             os.fsync(f.fileno())
-        os.rename(tmp_path, str(dest))
+        # os.replace, not os.rename: on Windows os.rename raises
+        # FileExistsError (WinError 183) when the destination exists.
+        # Re-uploading a file under an existing name is the normal path, so
+        # this is not an edge case there.
+        os.replace(tmp_path, str(dest))
     except Exception:
         try:
             os.unlink(tmp_path)
