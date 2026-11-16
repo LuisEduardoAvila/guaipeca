@@ -255,12 +255,18 @@ def cmd_status(args):
     print("\nGuaipeca Status")
     print(f"  Embedding model: {status['embedding_model']}")
     print(f"  Dimensions: {status['dimensions']}")
+    print(f"  Hybrid search: {'enabled' if status.get('hybrid_enabled') else 'disabled'}")
     print("\n  Corpora:")
     for c in status["corpora"]:
         print(f"    [{c['corpus']}]")
         print(f"      Total chunks: {c['total_chunks']}")
         print(f"      Total vectors: {c['total_vectors']}")
         print(f"      Files tracked: {c['files_tracked']}")
+        # BM25 state is what actually distinguishes a healthy hybrid corpus from
+        # one silently running dense-only. Reported by searcher.status and by the
+        # MCP status tool; omitting it here made the CLI and MCP disagree.
+        bm25 = "available" if c.get("bm25_available") else "unavailable"
+        print(f"      BM25 index: {bm25}")
     print()
 
 
