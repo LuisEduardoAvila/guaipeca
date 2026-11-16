@@ -315,12 +315,11 @@ def _split_paragraphs_aware(text: str, max_size: int) -> list[tuple[str, int, in
                 in_code_block = True
                 code_fence = fence_char
                 code_fence_len = fence_length
-            elif fence_char == code_fence:
-                # P3-6: closing fence must have >= opening fence length (CommonMark spec)
-                if fence_length >= code_fence_len:
-                    in_code_block = False
-                    code_fence = None
-                    code_fence_len = 0
+            # P3-6: closing fence must have >= opening fence length (CommonMark spec)
+            elif fence_char == code_fence and fence_length >= code_fence_len:
+                in_code_block = False
+                code_fence = None
+                code_fence_len = 0
 
         # Detect table boundaries: a table row starts with | and the next
         # line is a separator (|---|---|). Table ends at a blank line
