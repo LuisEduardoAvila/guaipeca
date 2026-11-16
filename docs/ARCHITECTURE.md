@@ -35,9 +35,8 @@ Indexer (index.py)                   Searcher (search.py)
   ▼
 MCP Server (mcp_server.py)
   ├─ 10 tools: search, get_chunk, get_document, list_documents, index, status, list_folders, upload, delete, get_toc
-  ├─ stdio transport (newline JSON-RPC)
-  ├─ HTTP/SSE transport (ThreadingHTTPServer)
-  ├─ Streamable HTTP transport (POST /mcp)
+  ├─ stdio transport (mcp SDK stdio_server)
+  ├─ Streamable HTTP transport (mcp SDK, served by uvicorn)
   ├─ Optional Bearer token auth
   └─ Error sanitization (path scrubbing, truncation)
 ```
@@ -256,18 +255,16 @@ Ten tools are exposed:
 
 ### Transports
 
-- **stdio** — Newline-delimited JSON-RPC over stdin/stdout. Used for local LLM integration.
-- **HTTP/SSE** — MCP-compliant Server-Sent Events transport:
-  - `GET /sse` — Opens a persistent SSE stream; server sends an `endpoint` event with a POST URL
-  - `POST /messages?session_id=<id>` — Client sends JSON-RPC messages via POST; server pushes responses through the SSE stream
+- **stdio** — Newline-delimited JSON-RPC over stdin/stdout, via the `mcp` SDK's `stdio_server`. Used for local LLM integration.
+- **Legacy SSE — removed.** `GET /sse` and `POST /messages` now return `410 Gone` with an explanatory body. The transport was deprecated upstream and carried its own session/queue machinery; `/mcp` serves both protocol eras on one endpoint instead.
 - **Streamable HTTP** — MCP Streamable HTTP transport (protocol `2025-11-25`), responses returned inline:
   - `POST /mcp` — JSON-RPC request in, JSON-RPC response out inline (`200`, `Content-Type: application/json`). `initialize` issues an `Mcp-Session-Id` response header; subsequent requests must send it. Notifications get `202` with an empty body; batch (JSON array) requests return a JSON array of responses. Requires protocol version `2025-03-26` or later. A `MCP-Protocol-Version` header is optional on post-initialize requests (absent is treated as the `2025-03-26` baseline); a present but unknown value returns `400`.
   - `DELETE /mcp` — Terminates a session (`Mcp-Session-Id` header required), returning `200`
   - `GET /mcp` — Returns `405 Method Not Allowed`: Guaipeca is request/response with no server-initiated messages, so the SSE-upgrade path is intentionally not implemented
 - **Shared endpoints** — `GET /health` (health check), `GET /tools` (convenience endpoint listing available tools), `DELETE /documents?corpus=<name>&filename=<name>` (delete a file from an upload-enabled corpus)
-- **Shared session store** — Legacy SSE and Streamable HTTP sessions live in the same in-memory `sessions` dict, keyed by UUID and protected by a single `threading.Lock`; sessions are tagged by transport and both are cleared on server restart
-- **Implementation** — Uses `ThreadingHTTPServer` for concurrent request handling (SSE connections are long-lived). Per-session message queues (`Queue`) deliver responses over SSE; Streamable HTTP responses are returned inline. No SDK dependency — stdlib `http.server` only.
-- **both** — stdio runs in a daemon thread, HTTP in the main thread
+- **Session store** — owned by the SDK's `StreamableHTTPSessionManager`; Guaipeca no longer keeps its own session dict or locks.
+- **Implementation** — the official `mcp` SDK (`Server.streamable_http_app`) under uvicorn. Tools are registered once and shared by both transports; blocking retrieval work runs on a worker thread (`anyio.to_thread`) so the event loop stays free. Origin/DNS-rebinding validation and the request-body cap are SDK `TransportSecuritySettings` / `max_request_body_size`, configured from `server.allowed_origins` and `server.max_body_size`. CORS response headers are added by a small ASGI middleware because the SDK validates Origin but does not emit `Access-Control-Allow-Origin`. Shutdown is uvicorn's graceful path — no `os._exit`.
+- **both** — stdio runs in a daemon thread with its own event loop, HTTP (uvicorn) in the main thread
 
 ### Authentication
 
