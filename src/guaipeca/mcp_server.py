@@ -80,8 +80,11 @@ TOOLS = [
     {
         "name": "search",
         "description": (
-            "Search across indexed document corpora. Returns results with "
-            "summary, location, corpus name, topic, and relevance score."
+            "Search indexed document corpora. Pass the scope as corpora=[\"name\"] "
+            "(a LIST). Omitting corpora searches EVERY corpus, so scope explicitly "
+            "when the user names one. Call status first if you do not know the "
+            "corpus names. Returns results with chunk_id, summary, location, "
+            "corpus, topic and score; follow up with get_chunk for full text."
         ),
         "inputSchema": {
             "type": "object",
@@ -98,12 +101,19 @@ TOOLS = [
                 "corpora": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional list of corpus names to search. Default: all.",
+                    "description": (
+                        "LIST of corpus names to search, e.g. [\"epm-docs\"]. "
+                        "Other tools take corpus=\"name\" (singular); this one is "
+                        "plural and takes an array. Omit to search all corpora."
+                    ),
                 },
                 "hybrid": {
                     "type": "boolean",
-                    "description": "Enable BM25 hybrid search (overrides config). Default: false.",
-                    "default": False,
+                    "description": (
+                        "Override BM25+dense hybrid retrieval. Omit to use the "
+                        "deployment default from config (search.hybrid), which is "
+                        "what you almost always want."
+                    ),
                 },
                 "return_mode": {
                     "type": "string",
@@ -127,7 +137,11 @@ TOOLS = [
                 },
                 "section_filter": {
                     "type": "string",
-                    "description": "Restrict search to a specific section ID or heading path prefix. Example: 'Chapter 3'.",
+                    "description": (
+                        "Restrict search to a section ID or heading path prefix, "
+                        "e.g. 'Chapter 3'. Only has effect when section_mode is "
+                        "true; ignored otherwise."
+                    ),
                 },
             },
             "required": ["query"],
@@ -162,7 +176,7 @@ TOOLS = [
             "properties": {
                 "corpus": {
                     "type": "string",
-                    "description": "Corpus name containing the document.",
+                    "description": "Single corpus name (not a list), e.g. 'epm-docs'.",
                 },
                 "source_path": {
                     "type": "string",
@@ -184,7 +198,7 @@ TOOLS = [
             "properties": {
                 "corpus": {
                     "type": "string",
-                    "description": "Corpus name to list documents for, or omit for all corpora.",
+                    "description": "Single corpus name (not a list). Omit to list every corpus.",
                 },
             },
         },
@@ -200,7 +214,7 @@ TOOLS = [
             "properties": {
                 "corpus": {
                     "type": "string",
-                    "description": "Corpus name to index, or 'all' for all corpora.",
+                    "description": "Single corpus name (not a list), or 'all'.",
                     "default": "all",
                 },
                 "force": {
@@ -213,7 +227,11 @@ TOOLS = [
     },
     {
         "name": "status",
-        "description": "Get status of all corpora: chunk counts, indexed files.",
+        "description": (
+            "List the configured corpora with chunk counts, indexed files and "
+            "BM25 availability. Call this first to learn valid corpus names "
+            "before searching or scoping other tools."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -242,7 +260,7 @@ TOOLS = [
             "properties": {
                 "corpus": {
                     "type": "string",
-                    "description": "Target corpus name (must be in upload.allow list).",
+                    "description": "Single corpus name (not a list); must be in upload.allow.",
                 },
                 "filename": {
                     "type": "string",
@@ -274,7 +292,7 @@ TOOLS = [
             "properties": {
                 "corpus": {
                     "type": "string",
-                    "description": "Corpus name to get ToC for.",
+                    "description": "Single corpus name (not a list).",
                 },
                 "document": {
                     "type": "string",
@@ -296,7 +314,9 @@ TOOLS = [
             "properties": {
                 "corpus": {
                     "type": "string",
-                    "description": "Target corpus name (must be in upload.allow list).",
+                    "description": (
+                        "Single corpus name (not a list); must be in upload.allow."
+                    ),
                 },
                 "filename": {
                     "type": "string",
@@ -446,7 +466,7 @@ class GuaipecaMCPServer:
             }
 
         elif method == "tools/list":
-            return {"tools": TOOLS}
+            return {"tools": self._tools_with_corpus_enum()}
 
         elif method == "tools/call":
             return self._handle_tool_call(params)
@@ -456,6 +476,49 @@ class GuaipecaMCPServer:
 
         else:
             return {"error": {"code": -32601, "message": f"Method not found: {method}"}}
+
+    def _tools_with_corpus_enum(self) -> list[dict]:
+        """Return TOOLS with the live corpus names advertised on corpus parameters.
+
+        A caller that does not know the valid names has to invent one, and an
+        invented name is either rejected (good) or, before validation existed,
+        silently treated as "search everything" (bad). Advertising the names in
+        the schema removes the guess.
+
+        Declaring an ``enum`` also lets JSON Schema validation reject an
+        unknown name before the call reaches this server.
+        """
+        try:
+            names = sorted(self.searcher.corpora.keys())
+        except Exception:
+            # Status must keep working even if corpora cannot be enumerated.
+            return TOOLS
+        if not names:
+            return TOOLS
+
+        tools = []
+        for tool in TOOLS:
+            properties = dict((tool.get("inputSchema") or {}).get("properties") or {})
+            changed = False
+            for param in ("corpus", "corpora"):
+                if param not in properties:
+                    continue
+                spec = dict(properties[param])
+                if param == "corpora":
+                    spec["items"] = {**spec.get("items", {}), "enum": names}
+                else:
+                    # `index` accepts the sentinel "all"; keep it selectable.
+                    values = [*names, "all"] if tool["name"] == "index" else names
+                    spec["enum"] = values
+                properties[param] = spec
+                changed = True
+            if changed:
+                tool = {
+                    **tool,
+                    "inputSchema": {**tool["inputSchema"], "properties": properties},
+                }
+            tools.append(tool)
+        return tools
 
     def _handle_tool_call(self, params: dict) -> dict:
         """Handle a tools/call request."""
