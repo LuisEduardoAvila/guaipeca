@@ -260,8 +260,8 @@ Ten tools are exposed:
 - **HTTP/SSE** — MCP-compliant Server-Sent Events transport:
   - `GET /sse` — Opens a persistent SSE stream; server sends an `endpoint` event with a POST URL
   - `POST /messages?session_id=<id>` — Client sends JSON-RPC messages via POST; server pushes responses through the SSE stream
-- **Streamable HTTP** — MCP Streamable HTTP transport (protocol `2025-06-18`), responses returned inline:
-  - `POST /mcp` — JSON-RPC request in, JSON-RPC response out inline (`200`, `Content-Type: application/json`). `initialize` issues an `Mcp-Session-Id` response header; subsequent requests must send it. Notifications get `202` with an empty body; batch (JSON array) requests return a JSON array of responses. Requires protocol version `2025-03-26` or later.
+- **Streamable HTTP** — MCP Streamable HTTP transport (protocol `2025-11-25`), responses returned inline:
+  - `POST /mcp` — JSON-RPC request in, JSON-RPC response out inline (`200`, `Content-Type: application/json`). `initialize` issues an `Mcp-Session-Id` response header; subsequent requests must send it. Notifications get `202` with an empty body; batch (JSON array) requests return a JSON array of responses. Requires protocol version `2025-03-26` or later. A `MCP-Protocol-Version` header is optional on post-initialize requests (absent is treated as the `2025-03-26` baseline); a present but unknown value returns `400`.
   - `DELETE /mcp` — Terminates a session (`Mcp-Session-Id` header required), returning `200`
   - `GET /mcp` — Returns `405 Method Not Allowed`: Guaipeca is request/response with no server-initiated messages, so the SSE-upgrade path is intentionally not implemented
 - **Shared endpoints** — `GET /health` (health check), `GET /tools` (convenience endpoint listing available tools), `DELETE /documents?corpus=<name>&filename=<name>` (delete a file from an upload-enabled corpus)
@@ -273,6 +273,7 @@ Ten tools are exposed:
 
 - Optional Bearer token auth (`server.auth_token` config field)
 - When auth is enabled, CORS is restricted (`null` origin instead of `*`)
+- Origin validation (`_origin_allowed()`): requests with an unrecognised `Origin` get `403` before auth runs. Default policy accepts loopback origins only; `server.allowed_origins` (list of exact strings) replaces that default. A missing `Origin` is always allowed (non-browser clients). Validated origins are echoed in `Access-Control-Allow-Origin`.
 - Error messages are sanitized: absolute file paths replaced with `[path]`, messages truncated to 300 characters
 
 ### Error sanitization

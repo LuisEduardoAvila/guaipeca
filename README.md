@@ -522,8 +522,25 @@ See `docs/container-deployment.md` for detailed VM deployment instructions.
 - **Authentication:** Set `auth_token` in the server config to require
   `Authorization: Bearer <token>` headers on HTTP requests. When auth is enabled,
   CORS is restricted (no wildcard origin).
+- **Origin validation (DNS-rebinding protection):** browser requests carry an
+  `Origin` header, and incoming requests with an unrecognised origin are
+  rejected with `403 Forbidden` before the auth check. By default only loopback
+  origins are accepted (`http://localhost:<port>`, `http://127.0.0.1:<port>`,
+  `http://[::1]:<port>`, any port). Requests with **no** `Origin` header (curl,
+  CLI tools, non-browser MCP clients) are always allowed. If you serve a browser
+  UI from any other host — including over a LAN address — you must add it
+  explicitly, or its requests will be rejected:
+  ```yaml
+  server:
+    allowed_origins:
+      - https://guaipeca.example.com   # exact match, scheme included
+      - http://192.168.1.20:3000
+  ```
+  Setting `allowed_origins` replaces the loopback default (it does not add to
+  it), so list every origin you need. Allowed origins are echoed back in
+  `Access-Control-Allow-Origin`.
 - **HTTP endpoints:**
-  - `POST /mcp` — Streamable HTTP transport (MCP protocol version `2025-06-18`); JSON-RPC request in, JSON-RPC response inline. `initialize` issues an `Mcp-Session-Id` header used on subsequent requests. Modern clients should prefer this endpoint.
+  - `POST /mcp` — Streamable HTTP transport (MCP protocol version `2025-11-25`); JSON-RPC request in, JSON-RPC response inline. `initialize` issues an `Mcp-Session-Id` header used on subsequent requests. Modern clients should prefer this endpoint. A client may send `MCP-Protocol-Version` on subsequent requests; an absent header is treated as the `2025-03-26` baseline, an unknown value gets `400`.
   - `DELETE /mcp` — terminate a Streamable HTTP session (send the `Mcp-Session-Id` header)
   - `GET /mcp` — returns `405 Method Not Allowed` (Guaipeca has no server-initiated messages; use `POST /mcp`)
   - `GET /sse` — SSE stream for MCP transport (legacy, still supported)

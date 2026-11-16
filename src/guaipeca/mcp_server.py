@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import difflib
 import hmac
+import ipaddress
 import json
 import logging
 import os
 import sys
 import threading
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any
@@ -67,11 +69,40 @@ def _is_non_loopback_host(host: str) -> bool:
     # they expose the service. Only genuine loopback is considered safe.
     return not ip.is_loopback
 
-# MCP protocol version
-MCP_VERSION = "2025-06-18"
+
+def _origin_allowed(origin: str, allowed_origins: list[str] | None) -> bool:
+    """Decide whether an incoming Origin header is acceptable.
+
+    - No Origin header: always allowed (curl, CLI, non-browser clients).
+    - Explicit allowlist: exact match, trailing "/" ignored.
+    - Otherwise: allow only http/https on loopback hosts, any port.
+      DNS rebinding always targets a public hostname, so this closes it.
+    """
+    if not origin:
+        return True
+    if allowed_origins:
+        norm = origin.rstrip("/")
+        return norm in {a.rstrip("/") for a in allowed_origins}
+    try:
+        parsed = urllib.parse.urlparse(origin)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host in ("localhost", "ip6-localhost", "ip6-loopback")
+
+
+# MCP protocol version (latest revision this server implements)
+MCP_VERSION = "2025-11-25"
 
 # Known protocol versions for negotiation
-KNOWN_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
+KNOWN_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
 
 # Minimum protocol version required for Streamable HTTP transport (/mcp)
 MIN_STREAMABLE_VERSION = "2025-03-26"
@@ -456,6 +487,12 @@ class GuaipecaMCPServer:
             if client_version in KNOWN_PROTOCOL_VERSIONS:
                 negotiated = client_version
             else:
+                logger.info(
+                    "Unknown MCP protocol version %r requested; "
+                    "falling back to %s",
+                    client_version,
+                    MCP_VERSION,
+                )
                 negotiated = MCP_VERSION
             return {
                 "protocolVersion": negotiated,
@@ -808,6 +845,9 @@ class GuaipecaMCPServer:
         # Read defensively: tests and embedding callers may pass a duck-typed
         # config whose .server only exposes auth_token.
         max_body_size = getattr(self.config.server, "max_body_size", 73400320)
+        # Browser Origin allowlist for CORS / DNS-rebinding protection.
+        # Read defensively for the same reason as max_body_size above.
+        allowed_origins = getattr(self.config.server, "allowed_origins", None)
 
         # Security nice-to-have: warn when exposed on a non-loopback interface
         # without auth. Optional auth is intentional by design, so this is a
@@ -867,6 +907,35 @@ class GuaipecaMCPServer:
                     return hmac.compare_digest(token, auth_token)
                 return False
 
+            def _check_origin(self) -> bool:
+                """Validate the Origin header. Returns True if the request may proceed.
+
+                Must run before auth so a cross-origin browser request is
+                rejected with 403 rather than prompting for a 401.
+                """
+                origin = self.headers.get("Origin", "").strip()
+                if _origin_allowed(origin, allowed_origins):
+                    return True
+                logger.warning(
+                    "Rejected request with disallowed Origin %r from %s",
+                    origin,
+                    self.client_address[0],
+                )
+                self._send_json(403, {})
+                return False
+
+            def _cors_value(self) -> str:
+                """Access-Control-Allow-Origin value for this response.
+
+                Echo a validated request Origin so cross-origin browser
+                clients get an exact match; otherwise keep the legacy value
+                ('*' without auth, 'null' with auth).
+                """
+                origin = self.headers.get("Origin", "").strip()
+                if origin and _origin_allowed(origin, allowed_origins):
+                    return origin
+                return cors_origin
+
             def _send_json(self, code: int, data: dict):
                 body = json.dumps(data).encode("utf-8")
                 self.send_response(code)
@@ -884,6 +953,9 @@ class GuaipecaMCPServer:
             def do_GET(self):
                 parsed = urllib.parse.urlparse(self.path)
 
+                if not self._check_origin():
+                    return
+
                 # SSE endpoint — opens a persistent event stream
                 if parsed.path == "/sse":
                     if not self._check_auth():
@@ -894,7 +966,7 @@ class GuaipecaMCPServer:
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Cache-Control", "no-cache")
                     self.send_header("Connection", "keep-alive")
-                    self.send_header("Access-Control-Allow-Origin", cors_origin)
+                    self.send_header("Access-Control-Allow-Origin", self._cors_value())
                     self.end_headers()
 
                     # Create a new session
@@ -1020,6 +1092,9 @@ class GuaipecaMCPServer:
                 parsed = urllib.parse.urlparse(self.path)
                 query_params = urllib.parse.parse_qs(parsed.query)
 
+                if not self._check_origin():
+                    return
+
                 # Streamable HTTP transport — POST /mcp
                 if parsed.path == "/mcp":
                     if not self._check_auth():
@@ -1040,7 +1115,7 @@ class GuaipecaMCPServer:
                         # Malformed JSON → parse error
                         self.send_response(200)
                         self.send_header("Content-Type", "application/json")
-                        self.send_header("Access-Control-Allow-Origin", cors_origin)
+                        self.send_header("Access-Control-Allow-Origin", self._cors_value())
                         resp_body = json.dumps({
                             "jsonrpc": "2.0",
                             "id": None,
@@ -1059,7 +1134,7 @@ class GuaipecaMCPServer:
                             self.send_response(200)
                             self.send_header("Content-Type", "application/json")
                             self.send_header("Content-Length", str(len(resp_body)))
-                            self.send_header("Access-Control-Allow-Origin", cors_origin)
+                            self.send_header("Access-Control-Allow-Origin", self._cors_value())
                             self.end_headers()
                             self.wfile.write(resp_body)
                             return
@@ -1075,7 +1150,7 @@ class GuaipecaMCPServer:
                             # All entries were notifications → 202 empty body
                             self.send_response(202)
                             self.send_header("Content-Length", "0")
-                            self.send_header("Access-Control-Allow-Origin", cors_origin)
+                            self.send_header("Access-Control-Allow-Origin", self._cors_value())
                             self.end_headers()
                             return
 
@@ -1083,7 +1158,7 @@ class GuaipecaMCPServer:
                         self.send_response(200)
                         self.send_header("Content-Type", "application/json")
                         self.send_header("Content-Length", str(len(resp_body)))
-                        self.send_header("Access-Control-Allow-Origin", cors_origin)
+                        self.send_header("Access-Control-Allow-Origin", self._cors_value())
                         self.end_headers()
                         self.wfile.write(resp_body)
                         return
@@ -1093,7 +1168,7 @@ class GuaipecaMCPServer:
                         # Not a valid JSON-RPC object → invalid request error
                         self.send_response(200)
                         self.send_header("Content-Type", "application/json")
-                        self.send_header("Access-Control-Allow-Origin", cors_origin)
+                        self.send_header("Access-Control-Allow-Origin", self._cors_value())
                         resp_body = json.dumps({
                             "jsonrpc": "2.0",
                             "id": None,
@@ -1138,7 +1213,7 @@ class GuaipecaMCPServer:
                             }
                             self.send_response(200)
                             self.send_header("Content-Type", "application/json")
-                            self.send_header("Access-Control-Allow-Origin", cors_origin)
+                            self.send_header("Access-Control-Allow-Origin", self._cors_value())
                             resp_body = json.dumps(err_resp).encode("utf-8")
                             self.send_header("Content-Length", str(len(resp_body)))
                             self.end_headers()
@@ -1158,7 +1233,7 @@ class GuaipecaMCPServer:
                         if result is None or req_id is None:
                             self.send_response(202)
                             self.send_header("Content-Length", "0")
-                            self.send_header("Access-Control-Allow-Origin", cors_origin)
+                            self.send_header("Access-Control-Allow-Origin", self._cors_value())
                             self.end_headers()
                             return
 
@@ -1168,7 +1243,7 @@ class GuaipecaMCPServer:
                         self.send_header("Content-Type", "application/json")
                         self.send_header("Content-Length", str(len(resp_body)))
                         self.send_header("Mcp-Session-Id", session.session_id)
-                        self.send_header("Access-Control-Allow-Origin", cors_origin)
+                        self.send_header("Access-Control-Allow-Origin", self._cors_value())
                         self.end_headers()
                         self.wfile.write(resp_body)
                         return
@@ -1177,7 +1252,7 @@ class GuaipecaMCPServer:
                     if not session_id_header:
                         self.send_response(400)
                         self.send_header("Content-Type", "application/json")
-                        self.send_header("Access-Control-Allow-Origin", cors_origin)
+                        self.send_header("Access-Control-Allow-Origin", self._cors_value())
                         resp_body = json.dumps({
                             "jsonrpc": "2.0",
                             "id": req_id,
@@ -1200,7 +1275,7 @@ class GuaipecaMCPServer:
                             # -32000 JSON-RPC body.
                             self.send_response(404)
                             self.send_header("Content-Type", "application/json")
-                            self.send_header("Access-Control-Allow-Origin", cors_origin)
+                            self.send_header("Access-Control-Allow-Origin", self._cors_value())
                             resp_body = json.dumps({
                                 "jsonrpc": "2.0",
                                 "id": req_id,
@@ -1211,6 +1286,36 @@ class GuaipecaMCPServer:
                             self.wfile.write(resp_body)
                             return
 
+                    # Streamable HTTP: a non-empty, unknown MCP-Protocol-Version
+                    # header is a client error (400). An ABSENT header is always
+                    # accepted — older clients predate the header and must keep
+                    # working (absent => treat as the 2025-03-26 baseline).
+                    protocol_version_header = self.headers.get(
+                        "MCP-Protocol-Version", ""
+                    ).strip()
+                    if (
+                        protocol_version_header
+                        and protocol_version_header not in KNOWN_PROTOCOL_VERSIONS
+                    ):
+                        self.send_response(400)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Access-Control-Allow-Origin", self._cors_value())
+                        resp_body = json.dumps({
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "error": {
+                                "code": -32000,
+                                "message": (
+                                    "Unsupported MCP-Protocol-Version: "
+                                    f"{protocol_version_header}"
+                                ),
+                            },
+                        }).encode("utf-8")
+                        self.send_header("Content-Length", str(len(resp_body)))
+                        self.end_headers()
+                        self.wfile.write(resp_body)
+                        return
+
                     # Process the request
                     result = server_instance.handle_request(method, params)
 
@@ -1218,7 +1323,7 @@ class GuaipecaMCPServer:
                     if result is None or req_id is None:
                         self.send_response(202)
                         self.send_header("Content-Length", "0")
-                        self.send_header("Access-Control-Allow-Origin", cors_origin)
+                        self.send_header("Access-Control-Allow-Origin", self._cors_value())
                         self.end_headers()
                         return
 
@@ -1227,7 +1332,7 @@ class GuaipecaMCPServer:
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(resp_body)))
-                    self.send_header("Access-Control-Allow-Origin", cors_origin)
+                    self.send_header("Access-Control-Allow-Origin", self._cors_value())
                     self.end_headers()
                     self.wfile.write(resp_body)
                     return
@@ -1275,6 +1380,9 @@ class GuaipecaMCPServer:
                 parsed = urllib.parse.urlparse(self.path)
                 query_params = urllib.parse.parse_qs(parsed.query)
 
+                if not self._check_origin():
+                    return
+
                 # DELETE /mcp — terminate a streamable HTTP (or legacy SSE) session
                 if parsed.path == "/mcp":
                     if not self._check_auth():
@@ -1284,6 +1392,28 @@ class GuaipecaMCPServer:
                     session_id_header = self.headers.get("Mcp-Session-Id", "").strip()
                     if not session_id_header:
                         self._send_json(400, {"error": "Missing Mcp-Session-Id header"})
+                        return
+
+                    # Same Streamable HTTP rule as POST /mcp: unknown non-empty
+                    # MCP-Protocol-Version is a 400; absent is always fine.
+                    protocol_version_header = self.headers.get(
+                        "MCP-Protocol-Version", ""
+                    ).strip()
+                    if (
+                        protocol_version_header
+                        and protocol_version_header not in KNOWN_PROTOCOL_VERSIONS
+                    ):
+                        self._send_json(400, {
+                            "jsonrpc": "2.0",
+                            "id": None,
+                            "error": {
+                                "code": -32000,
+                                "message": (
+                                    "Unsupported MCP-Protocol-Version: "
+                                    f"{protocol_version_header}"
+                                ),
+                            },
+                        })
                         return
 
                     with sessions_lock:
@@ -1321,10 +1451,12 @@ class GuaipecaMCPServer:
 
             def do_OPTIONS(self):
                 """Handle CORS preflight requests."""
+                if not self._check_origin():
+                    return
                 self.send_response(204)
-                self.send_header("Access-Control-Allow-Origin", cors_origin)
+                self.send_header("Access-Control-Allow-Origin", self._cors_value())
                 self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version")
                 self.end_headers()
 
             def send_error(self, code, message=None, explain=None):
