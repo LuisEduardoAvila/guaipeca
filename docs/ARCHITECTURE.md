@@ -354,9 +354,9 @@ Guaipeca can run in a Docker container for VM deployment (ARM64 or x86_64). The 
 
 ### Multi-stage Docker Build
 
-**Builder stage:** Python 3.12-slim + build deps → installs all pip dependencies into a venv.
+**Builder stage:** Python 3.13-slim + build deps → installs all pip dependencies into a venv.
 
-**Runtime stage:** Python 3.12-slim + runtime system libs → copies venv from builder, creates non-root user, exposes port 8090, sets health check.
+**Runtime stage:** Python 3.13-slim + runtime system libs → copies venv from builder, creates non-root user, exposes port 8090, sets health check.
 
 This keeps the image small (~643MB before model download) and separates build-only dependencies from runtime. Uses fastembed (ONNX Runtime ~46MB) instead of sentence-transformers/torch (~959MB), reducing image size by ~63%.
 
