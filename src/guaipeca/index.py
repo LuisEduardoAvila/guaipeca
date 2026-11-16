@@ -275,7 +275,6 @@ class CorpusIndex:
 
         if not has_structure:
             # Non-structured document
-            import os
             filename = os.path.basename(source_path)
             return {
                 "title": filename,
