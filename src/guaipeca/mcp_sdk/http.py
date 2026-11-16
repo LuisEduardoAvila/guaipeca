@@ -52,7 +52,6 @@ from guaipeca.mcp_server import _is_non_loopback_host, _origin_allowed
 from .tools import build_server
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from starlette.applications import Starlette
 
     from guaipeca.config import GuaipecaConfig
     from guaipeca.mcp_server import GuaipecaMCPServer
@@ -214,6 +213,52 @@ def _cors_origin(request: Any, auth_token: str | None, allowed_origins: list[str
     return "*" if not auth_token else "null"
 
 
+class _CorsMiddleware:
+    """Add ``Access-Control-Allow-Origin`` and answer CORS preflights.
+
+    The SDK validates the Origin header (DNS-rebinding protection) but does not
+    emit CORS response headers, so without this a browser client passes the
+    origin check and then has its response withheld. Pre-PR-23 behaviour:
+    echo a validated Origin, else '*' without auth and 'null' with.
+    """
+
+    def __init__(self, app: Any, auth_token: str | None, allowed_origins: list[str] | None) -> None:
+        self.app = app
+        self.auth_token = auth_token
+        self.allowed_origins = allowed_origins
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        origin = ""
+        for key, value in scope.get("headers", []):
+            if key == b"origin":
+                origin = value.decode("latin-1").strip()
+                break
+
+        if origin and not _origin_allowed(origin, self.allowed_origins):
+            # The SDK's transport security would reject this too; answering here
+            # keeps the 403 and stops a disallowed origin reaching any route.
+            response = JSONResponse({"error": "origin not allowed"}, status_code=403)
+            await response(scope, receive, send)
+            return
+
+        allow = origin if origin else ("*" if not self.auth_token else "null")
+
+        async def send_with_cors(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append((b"access-control-allow-origin", allow.encode("latin-1")))
+                if origin:
+                    headers.append((b"vary", b"Origin"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_cors)
+
+
 def _server_config(config: GuaipecaConfig) -> Any:
     """``config.server`` if it looks usable, else None.
 
@@ -341,8 +386,11 @@ def _mcp_trailing_slash(request: Any) -> RedirectResponse:
 
 def build_app(
     config: GuaipecaConfig, server_instance: GuaipecaMCPServer, *, host: str | None = None
-) -> Starlette:
+) -> Any:
     """Assemble the HTTP app: SDK Streamable HTTP plus Guaipeca's plain endpoints.
+
+    Returns the SDK app wrapped in :class:`_CorsMiddleware` (an ASGI callable),
+    so the annotation is ``Any`` rather than ``Starlette``.
 
     ``host`` is the bind address, used to warn about an unauthenticated public
     bind and to add its Host header form to the allowlist. Omitted, the
@@ -413,7 +461,8 @@ def build_app(
         )
         kwargs["token_verifier"] = _HmacTokenVerifier(auth_token)
 
-    return srv.streamable_http_app(**kwargs)
+    app = srv.streamable_http_app(**kwargs)
+    return _CorsMiddleware(app, auth_token, allowed_origins)
 
 
 # ---- uvicorn run loop -------------------------------------------------------

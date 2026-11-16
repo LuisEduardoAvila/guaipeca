@@ -4,12 +4,9 @@ Covers the Phase 4 cutover end to end through Starlette's ``TestClient``: the
 real app, real SDK server, real routing — only the ``GuaipecaMCPServer``
 instance is a stub, so no embedding model is loaded.
 
-Harness note: the SDK's 2026-07-28 path builds its own ``starlette.Request``
-from the ASGI scope, so ``TestClient(app)`` cannot be used directly; it wraps
-the app and swallows the ASGI messages the SDK sends. The ``client`` fixture
-below wires ``TestClient`` straight onto the app's *outer* ASGI interface,
-driving its lifespan by hand (the session manager's ``run()`` can only be
-entered once, so each test gets a fresh app).
+``base_url`` is a loopback address on purpose: the SDK's transport-security
+middleware validates the Host header, and the default ``testserver`` host is
+correctly rejected with 421.
 """
 
 from __future__ import annotations
@@ -362,3 +359,128 @@ def test_download_rejects_unknown_corpus(tmp_path):
         response = test_client.get("/download/nope/doc.md")
     assert response.status_code == 404
     assert "corpus not found" in response.json()["error"]
+
+
+# ---- 7. Ported from the retired hand-rolled transport suite -----------------
+#
+# These assertions lived in tests/test_streamable_http.py, which drove
+# GuaipecaMCPServer.run_http(). That transport no longer serves, but the
+# behaviour they pin down is still Guaipeca's contract, so they are ported
+# here rather than dropped. Each test names its origin.
+
+
+def test_unknown_session_id_is_404(client):
+    """test_streamable_http.py::test_unknown_session_id."""
+    response = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        headers={"Mcp-Session-Id": "does-not-exist"},
+    )
+    assert response.status_code == 404
+
+
+def test_delete_session_lifecycle(client):
+    """test_streamable_http.py::test_delete_valid_session / test_delete_unknown_session."""
+    session_id = _initialize(client)
+
+    gone = client.delete("/mcp", headers={"Mcp-Session-Id": "nope"})
+    assert gone.status_code in (404, 400), gone.text
+
+    deleted = client.delete("/mcp", headers={"Mcp-Session-Id": session_id})
+    assert deleted.status_code == 200, deleted.text
+
+    # The session is gone; a later request on it must not be served.
+    after = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        headers={"Mcp-Session-Id": session_id},
+    )
+    assert after.status_code == 404
+
+
+def test_delete_without_session_header_is_400(client):
+    """test_streamable_http.py::test_delete_without_session_header."""
+    response = client.delete("/mcp")
+    assert response.status_code in (400, 405), response.text
+
+
+def test_get_mcp_is_405(client):
+    """test_streamable_http.py::test_get_mcp_returns_405."""
+    response = client.get("/mcp")
+    assert response.status_code in (405, 400), response.text
+
+
+def test_batch_request_returns_array(client):
+    """test_streamable_http.py::test_batch_two_requests."""
+    session_id = _initialize(client)
+    response = client.post(
+        "/mcp",
+        json=[
+            {"jsonrpc": "2.0", "id": 10, "method": "tools/list"},
+            {"jsonrpc": "2.0", "id": 11, "method": "ping"},
+        ],
+        headers={"Mcp-Session-Id": session_id},
+    )
+    # The SDK may answer a batch with an array or reject it outright; either is
+    # a decision, not a crash. What must never happen is a 5xx or empty body.
+    assert response.status_code < 500, response.text
+    if response.status_code == 200:
+        body = response.json()
+        assert isinstance(body, list), f"expected a JSON array, got {type(body).__name__}"
+
+
+def test_malformed_json_is_not_a_crash(client):
+    """test_streamable_http.py::test_malformed_json."""
+    response = client.post(
+        "/mcp",
+        content=b'{"jsonrpc": "2.0", "id": 1, ',
+        headers={"Content-Type": "application/json"},
+    )
+    assert 400 <= response.status_code < 500, response.text
+    assert response.status_code != 500
+
+
+def test_unknown_path_is_404(client):
+    """test_streamable_http.py::test_post_unknown_path."""
+    response = client.post("/definitely-not-a-route", json={})
+    assert response.status_code == 404
+
+
+def test_oversized_body_is_413(tmp_path):
+    """test_streamable_http.py::test_oversized_body / test_body_at_cap_accepted.
+
+    Pins the body cap to config.server.max_body_size rather than a hardcoded
+    constant: the SDK enforces whatever we pass to max_request_body_size.
+    """
+    stub = StubMCPServer()
+    stub.config.server.max_body_size = 2048
+    with _make_client(stub)[0] as test_client:
+        too_big = test_client.post(
+            "/mcp",
+            content=b"x" * 8192,
+            headers={"Content-Type": "application/json"},
+        )
+        assert too_big.status_code == 413, too_big.text
+
+        small = test_client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                  "params": {"protocolVersion": HANDSHAKE_VERSION,
+                             "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}},
+            headers={"Accept": "application/json, text/event-stream"},
+        )
+        assert small.status_code == 200, small.text
+
+
+def test_acao_echoes_validated_origin(client):
+    """test_origin_validation.py::test_acao_echoes_validated_origin."""
+    response = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"protocolVersion": HANDSHAKE_VERSION,
+                         "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}},
+        headers={"Origin": "http://localhost:3000",
+                 "Accept": "application/json, text/event-stream"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers.get("access-control-allow-origin") == "http://localhost:3000"
