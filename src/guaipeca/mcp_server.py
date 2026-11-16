@@ -21,6 +21,7 @@ Transports:
 
 from __future__ import annotations
 
+import difflib
 import hmac
 import json
 import logging
@@ -462,6 +463,10 @@ class GuaipecaMCPServer:
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
 
+        rejection = self._reject_unknown_arguments(tool_name, arguments)
+        if rejection is not None:
+            return rejection
+
         if tool_name == "search":
             query = arguments.get("query", "")
             top_k = arguments.get("top_k", 5)
@@ -476,6 +481,11 @@ class GuaipecaMCPServer:
                 return_mode=return_mode, max_chars=max_chars,
                 section_mode=section_mode, section_filter=section_filter,
             )
+            # search() reports validation failures as {"results": [], "error": ...}.
+            # Returning that as a success made a wrong corpus name look like a
+            # valid zero-hit search, which a client cannot distinguish.
+            if isinstance(result, dict) and result.get("error"):
+                return self._error_result(result["error"])
             return self._result_to_mcp(result)
 
         elif tool_name == "get_chunk":
@@ -565,6 +575,44 @@ class GuaipecaMCPServer:
                 {"type": "text", "text": message},
             ],
         }
+
+    @staticmethod
+    def _reject_unknown_arguments(tool_name: str, arguments: dict) -> dict | None:
+        """Return an error result if ``arguments`` carries keys the tool does not declare.
+
+        JSON Schema does not forbid extra properties, and this server read
+        arguments with ``arguments.get(...)``, so a misspelled or wrong-typed
+        key was silently dropped. That mattered: ``search`` interpreted a
+        missing ``corpora`` as "every corpus", so a caller passing
+        ``corpus`` (singular) got results from all corpora while believing
+        the search was scoped. Silent scope widening is indistinguishable from
+        a correct answer, so it must be an error.
+        """
+        tool = next((t for t in TOOLS if t["name"] == tool_name), None)
+        if tool is None:
+            return None
+
+        schema = tool.get("inputSchema") or {}
+        allowed = set((schema.get("properties") or {}).keys())
+        # A tool declaring no properties (status, list_folders) still accepts no
+        # arguments: an empty schema means "none", not "anything". Those calls
+        # pass {} and are unaffected, while stray keys are caught instead of
+        # silently ignored.
+
+        unknown = sorted(set(arguments or {}) - allowed)
+        if not unknown:
+            return None
+
+        # Suggest the closest declared name when the caller typo'd a known one.
+        suggestions = []
+        for key in unknown:
+            close = difflib.get_close_matches(key, allowed, n=1, cutoff=0.6)
+            suggestions.append(f"{key!r} (did you mean {close[0]!r}?)" if close else repr(key))
+
+        return GuaipecaMCPServer._error_result(
+            f"Unknown argument(s) for tool {tool_name!r}: {', '.join(suggestions)}. "
+            f"Accepted: {', '.join(sorted(allowed)) or '(none)'}."
+        )
 
     def _list_upload_folders(self) -> dict:
         """List corpora that accept file uploads (delegates to shared core)."""
