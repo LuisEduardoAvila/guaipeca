@@ -12,6 +12,7 @@ No embedding model is loaded here — a stub server instance supplies
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 from pathlib import Path
@@ -211,3 +212,42 @@ def test_call_tool_preserves_is_error():
 def test_every_golden_tool_has_required_keys(tool):
     """Belt-and-braces: each tool still carries name/description/inputSchema."""
     assert tool["name"] and tool.get("description") and tool.get("inputSchema")
+
+
+# ---- 5. Stray sync handler guard -------------------------------------------
+
+
+def test_all_registered_handlers_are_async_or_threaded():
+    """No request handler may be a bare blocking ``def``.
+
+    The SDK awaits handlers directly on its event loop, so a plain synchronous
+    handler that does real work (a search, a conversion, a model call) blocks
+    that loop for every client on the connection — not just the caller. Our
+    handlers are async and hand blocking work to ``anyio.to_thread``; this test
+    fails the moment someone registers a ``def`` instead, before it reaches a
+    live session.
+    """
+    server = build_server(config=None, server_instance=StubMCPServer())
+
+    handlers = getattr(server, "_request_handlers", None)
+    assert handlers, (
+        "Server._request_handlers is empty or missing; the SDK storage changed "
+        "and this guard is no longer inspecting the registered handlers"
+    )
+
+    offenders = []
+    for key, entry in handlers.items():
+        method = str(getattr(key, "value", key))
+        handler = getattr(entry, "handler", entry)
+        if not inspect.iscoroutinefunction(handler):
+            offenders.append(f"{method} -> {getattr(handler, '__qualname__', handler)!r}")
+
+    assert not offenders, (
+        "Synchronous request handler(s) registered on the SDK server:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nA blocking handler stalls the event loop for every client "
+        "(searches, conversions and model calls would freeze the whole "
+        "session, not just that request). Make the handler ``async def`` and "
+        "run the blocking work with ``anyio.to_thread.run_sync`` "
+        "(see ``on_call_tool`` in ``guaipeca.mcp_sdk.tools``)."
+    )

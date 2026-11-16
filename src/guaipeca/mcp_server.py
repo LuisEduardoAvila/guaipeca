@@ -1558,15 +1558,37 @@ class GuaipecaMCPServer:
                 pass
         os._exit(0)
 
+    def run_sdk_stdio(self):
+        """Run the stdio transport through the official SDK (async stdio session).
+
+        Replaces ``run_stdio()``'s hand-rolled stdin line loop. ``run_stdio`` is
+        kept until the HTTP cutover (Phase 4) and cleanup (Phase 6).
+
+        The SDK's ``Server`` is fully async, so it needs an event loop. When
+        called from a thread without a running loop (the ``both`` transport),
+        ``asyncio.run`` creates that loop in the calling thread. Do not call
+        this from inside a running loop: ``asyncio.run`` would raise, and a
+        second loop on the same thread is not what the SDK expects.
+        """
+        import asyncio
+
+        from .mcp_sdk.tools import run_stdio as _run_sdk_stdio
+
+        logger.info("Starting Guaipeca MCP server (stdio, mcp SDK)")
+        asyncio.run(_run_sdk_stdio(self.config, self))
+
     def run(self, transport: str = "both", host: str = "127.0.0.1", port: int = 8090):
         """Run the server with the specified transport(s)."""
         if transport == "stdio":
-            self.run_stdio()
+            self.run_sdk_stdio()
         elif transport == "http":
             self.run_http(host, port)
         elif transport == "both":
-            # Run stdio in a daemon thread, HTTP in main
-            stdio_thread = threading.Thread(target=self.run_stdio, daemon=True)
+            # Run stdio in a daemon thread, HTTP in main. The stdio side is an
+            # asyncio loop owned entirely by that worker thread (see
+            # run_sdk_stdio), so it cannot interact with the HTTP thread's loop
+            # or signal handling.
+            stdio_thread = threading.Thread(target=self.run_sdk_stdio, daemon=True)
             stdio_thread.start()
             self.run_http(host, port)
         else:
