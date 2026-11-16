@@ -61,9 +61,10 @@ def _read_config_text(path: str) -> str:
         raise AssertionError("decode should have failed")
     except UnicodeDecodeError as e:
         byte = raw[e.start]
+        line = raw[: e.start].count(b"\n") + 1
         raise ValueError(
             f"Config file {path} is not valid UTF-8: byte 0x{byte:02x} at offset "
-            f"{e.start} (line {raw[:e.start].count(b'\\n') + 1}). This usually means "
+            f"{e.start} (line {line}). This usually means "
             "the file was saved as Windows-1252 with non-ASCII characters "
             "(smart quotes, em dashes, accented letters). Re-save it as UTF-8."
         ) from e
