@@ -188,7 +188,11 @@ class CorpusIndex:
                 json.dump(data, f, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
-            os.rename(tmp_path, str(path))
+            # os.replace, not os.rename: on Windows os.rename raises
+            # FileExistsError (WinError 183) when the destination exists,
+            # which it always does on a re-index. os.replace overwrites on
+            # every platform and keeps the atomic-replace guarantee.
+            os.replace(tmp_path, str(path))
         except Exception:
             # Clean up temp file on error
             try:
@@ -213,7 +217,7 @@ class CorpusIndex:
         try:
             os.close(tmp_fd)
             faiss.write_index(faiss_index, tmp_path)
-            os.rename(tmp_path, str(path))
+            os.replace(tmp_path, str(path))
         except Exception:
             try:
                 os.unlink(tmp_path)
@@ -627,38 +631,89 @@ class CorpusIndex:
         """
         Acquire an exclusive file lock for indexing this corpus.
 
-        Uses fcntl.flock on a lock file. Returns True if lock acquired,
-        False if another process holds the lock. On non-Unix systems,
-        returns True (no file locking available).
+        Uses fcntl.flock on POSIX and msvcrt.locking on Windows. Returns True
+        if the lock was acquired, False if another process holds it. If
+        neither mechanism is available the lock is skipped (with a warning)
+        so indexing still runs.
+
+        Without a platform lock, two concurrent index runs against the same
+        corpus can interleave their writes to metadata.json / *.faiss and
+        produce a corrupt or half-updated index.
         """
+        self._lock_kind = None
+        try:
+            self._lock_fd = open(self.lock_path, "w")
+        except OSError as e:
+            logger.warning("Could not open lock file %s: %s; proceeding unlocked",
+                           self.lock_path, e)
+            self._lock_fd = None
+            return True
+
         try:
             import fcntl
         except ImportError:
-            # Non-Unix system (e.g. Windows) — no fcntl available
-            logger.warning("fcntl not available on this platform; file locking disabled")
-            self._lock_fd = None
-            return True
+            fcntl = None
+
+        if fcntl is not None:
+            try:
+                fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self._lock_kind = "fcntl"
+                return True
+            except OSError:
+                self._close_lock_fd()
+                return False
 
         try:
-            self._lock_fd = open(self.lock_path, "w")
-            fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return True
-        except OSError:
-            # Lock is held by another process
-            if hasattr(self, "_lock_fd") and self._lock_fd:
+            import msvcrt
+        except ImportError:
+            msvcrt = None
+
+        if msvcrt is not None:
+            try:
+                # Lock 1 byte at offset 0. msvcrt.locking works on the file
+                # descriptor and raises OSError when the region is held.
+                self._lock_fd.seek(0)
+                msvcrt.locking(self._lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+                self._lock_kind = "msvcrt"
+                return True
+            except OSError:
+                self._close_lock_fd()
+                return False
+
+        logger.warning(
+            "No file locking available on this platform (no fcntl or msvcrt); "
+            "file locking disabled"
+        )
+        self._close_lock_fd()
+        return True
+
+    def _close_lock_fd(self) -> None:
+        """Close and forget the lock file descriptor."""
+        if getattr(self, "_lock_fd", None):
+            try:
                 self._lock_fd.close()
-            return False
+            except OSError:
+                pass
+        self._lock_fd = None
 
     def _release_lock(self) -> None:
         """Release the file lock."""
-        if hasattr(self, "_lock_fd") and self._lock_fd:
-            try:
+        if not getattr(self, "_lock_fd", None):
+            return
+
+        kind = getattr(self, "_lock_kind", None)
+        try:
+            if kind == "fcntl":
                 import fcntl
                 fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_UN)
-                self._lock_fd.close()
-            except (OSError, ImportError):
-                pass
-            self._lock_fd = None
+            elif kind == "msvcrt":
+                import msvcrt
+                self._lock_fd.seek(0)
+                msvcrt.locking(self._lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+        except (OSError, ImportError):
+            pass
+        self._close_lock_fd()
+        self._lock_kind = None
 
     def _scan_files(self) -> list[str]:
         """Scan corpus directory for files to index."""
