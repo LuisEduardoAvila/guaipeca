@@ -1,0 +1,217 @@
+{
+  "tools": [
+    {
+      "description": "Search indexed document corpora. Pass the scope as corpora=[\"name\"] (a LIST). Omitting corpora searches EVERY corpus, so scope explicitly when the user names one. Call status first if you do not know the corpus names. Returns results with chunk_id, summary, location, corpus, topic and score; follow up with get_chunk for full text.",
+      "inputSchema": {
+        "properties": {
+          "corpora": {
+            "description": "LIST of corpus names to search, e.g. [\"epm-docs\"]. Other tools take corpus=\"name\" (singular); this one is plural and takes an array. Omit to search all corpora.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "hybrid": {
+            "description": "Override BM25+dense hybrid retrieval. Omit to use the deployment default from config (search.hybrid), which is what you almost always want.",
+            "type": "boolean"
+          },
+          "max_chars": {
+            "default": 8000,
+            "description": "Threshold for auto return_mode (total result chars). Default: 8000.",
+            "type": "integer"
+          },
+          "query": {
+            "description": "Search query text.",
+            "type": "string"
+          },
+          "return_mode": {
+            "default": "chunks",
+            "description": "Result granularity: 'chunks' returns individual chunks (default), 'documents' returns full source documents deduplicated by path, 'auto' returns chunks if total size < max_chars threshold, otherwise documents.",
+            "type": "string"
+          },
+          "section_filter": {
+            "description": "Restrict search to a section ID or heading path prefix, e.g. 'Chapter 3'. Only has effect when section_mode is true; ignored otherwise.",
+            "type": "string"
+          },
+          "section_mode": {
+            "default": false,
+            "description": "If true, group results by section and return full section text. Default: false.",
+            "type": "boolean"
+          },
+          "top_k": {
+            "default": 5,
+            "description": "Number of results to return (default: 5).",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "search"
+    },
+    {
+      "description": "Retrieve the full text of a specific chunk by its chunk_id. Use after search to get complete content.",
+      "inputSchema": {
+        "properties": {
+          "chunk_id": {
+            "description": "Chunk ID from search results (format: corpus:stable_id).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "chunk_id"
+        ],
+        "type": "object"
+      },
+      "name": "get_chunk"
+    },
+    {
+      "description": "Retrieve the full converted text (markdown) of a document by corpus name and source_path. Returns text content plus metadata (filename, file size, chunk count).",
+      "inputSchema": {
+        "properties": {
+          "corpus": {
+            "description": "Single corpus name (not a list), e.g. 'epm-docs'.",
+            "type": "string"
+          },
+          "source_path": {
+            "description": "Absolute path to the source file (from list_documents or search results).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "corpus",
+          "source_path"
+        ],
+        "type": "object"
+      },
+      "name": "get_document"
+    },
+    {
+      "description": "List all indexed documents in a corpus (or all corpora if no corpus specified). Returns source_path, filename, chunk count, file size, and last_indexed timestamp for each document.",
+      "inputSchema": {
+        "properties": {
+          "corpus": {
+            "description": "Single corpus name (not a list). Omit to list every corpus.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_documents"
+    },
+    {
+      "description": "Trigger indexing for a specific corpus or all corpora. Incremental by default (only indexes changed files).",
+      "inputSchema": {
+        "properties": {
+          "corpus": {
+            "default": "all",
+            "description": "Single corpus name (not a list), or 'all'.",
+            "type": "string"
+          },
+          "force": {
+            "default": false,
+            "description": "Force re-index all files (ignore hash cache).",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "index"
+    },
+    {
+      "description": "List the configured corpora with chunk counts, indexed files and BM25 availability. Call this first to learn valid corpus names before searching or scoping other tools.",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "status"
+    },
+    {
+      "description": "List corpora that accept file uploads via the upload tool. Returns corpus name, path, topic, and allowed extensions.",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "list_folders"
+    },
+    {
+      "description": "Upload a file to a corpus for conversion and indexing. The file content must be base64-encoded. Only corpora configured in upload.allow can receive files.",
+      "inputSchema": {
+        "properties": {
+          "content": {
+            "description": "Base64-encoded file content.",
+            "type": "string"
+          },
+          "corpus": {
+            "description": "Single corpus name (not a list); must be in upload.allow.",
+            "type": "string"
+          },
+          "filename": {
+            "description": "Filename including extension (e.g. 'report.pdf').",
+            "type": "string"
+          },
+          "index": {
+            "default": true,
+            "description": "If true (default), index the corpus after upload.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "corpus",
+          "filename",
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "upload"
+    },
+    {
+      "description": "Get the table of contents for a corpus or a specific document. Returns a nested tree of headings with chunk counts, or a list of documents with their top-level headings. Non-structured documents return a structured=false flag.",
+      "inputSchema": {
+        "properties": {
+          "corpus": {
+            "description": "Single corpus name (not a list).",
+            "type": "string"
+          },
+          "document": {
+            "description": "Optional: specific document source path to get ToC for. If omitted, lists all documents.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "corpus"
+        ],
+        "type": "object"
+      },
+      "name": "get_toc"
+    },
+    {
+      "description": "Delete a file from a corpus that accepts uploads. Only corpora configured in upload.allow can have files deleted. The corpus is re-indexed after deletion to remove stale chunks.",
+      "inputSchema": {
+        "properties": {
+          "corpus": {
+            "description": "Single corpus name (not a list); must be in upload.allow.",
+            "type": "string"
+          },
+          "filename": {
+            "description": "Filename including extension (e.g. 'report.pdf').",
+            "type": "string"
+          },
+          "index": {
+            "default": true,
+            "description": "If true (default), re-index the corpus after deletion.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "corpus",
+          "filename"
+        ],
+        "type": "object"
+      },
+      "name": "delete"
+    }
+  ]
+}
