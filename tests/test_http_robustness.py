@@ -18,6 +18,18 @@ These tests verify:
 
 from __future__ import annotations
 
+# The malformed-request tests drive GuaipecaMCPServer.run_http(), the hand-rolled
+# ThreadingHTTPServer transport, which no longer serves after Phase 4 of the MCP
+# SDK migration. Robustness against garbage request lines is now uvicorn's
+# responsibility, not Guaipeca's - it is not our parser any more.
+# Kept (not deleted) so Phase 5's assertion-mapping table can record the decision
+# explicitly. The host-warning tests above still run: they test pure helpers.
+import pytest as _pytest
+
+_OLD_TRANSPORT = _pytest.mark.skip(
+    reason="hand-rolled transport removed in Phase 4; malformed-request parsing is uvicorn's now"
+)
+
 import socket
 import struct
 import sys
@@ -32,9 +44,8 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from guaipeca.mcp_server import TOOLS, MCP_VERSION, KNOWN_PROTOCOL_VERSIONS
 from guaipeca import __version__
-
+from guaipeca.mcp_server import KNOWN_PROTOCOL_VERSIONS, MCP_VERSION, TOOLS
 
 # ---- Mock MCP Server (same pattern as test_streamable_http.py) ----
 
@@ -173,8 +184,9 @@ def _start_mock_server(auth_token: str | None = None) -> dict:
 
 
 def _stop_mock_server(server_info: dict):
-    from guaipeca.mcp_server import GuaipecaMCPServer as RealServer
     import signal as signal_module
+
+    from guaipeca.mcp_server import GuaipecaMCPServer as RealServer
     RealServer.__init__ = server_info["_original_init"]
     RealServer.handle_request = server_info["_original_handle_request"]
     signal_module.signal = server_info["_original_signal"]
@@ -198,6 +210,7 @@ def _send_garbage_and_rst(host: str, port: int, payload: bytes = b"GARBAGE\r\n\r
 
 # ---- Tests ----
 
+@_OLD_TRANSPORT
 class TestMalformedRequestNoCrash:
     """Malformed request lines must not produce unhandled tracebacks."""
 

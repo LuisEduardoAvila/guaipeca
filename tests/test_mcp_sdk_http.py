@@ -1,0 +1,364 @@
+"""Tests for the SDK-backed HTTP transport (``guaipeca.mcp_sdk.http``).
+
+Covers the Phase 4 cutover end to end through Starlette's ``TestClient``: the
+real app, real SDK server, real routing — only the ``GuaipecaMCPServer``
+instance is a stub, so no embedding model is loaded.
+
+Harness note: the SDK's 2026-07-28 path builds its own ``starlette.Request``
+from the ASGI scope, so ``TestClient(app)`` cannot be used directly; it wraps
+the app and swallows the ASGI messages the SDK sends. The ``client`` fixture
+below wires ``TestClient`` straight onto the app's *outer* ASGI interface,
+driving its lifespan by hand (the session manager's ``run()`` can only be
+entered once, so each test gets a fresh app).
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+from starlette.testclient import TestClient
+
+# Ensure project root is on sys.path (same preamble as the other HTTP tests)
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from guaipeca import __version__
+from guaipeca.config import CorpusConfig, ServerConfig
+from guaipeca.mcp_sdk.http import (
+    _allowed_host_patterns,
+    _allowed_origin_patterns,
+    build_app,
+)
+from guaipeca.mcp_server import TOOLS
+
+MODERN_VERSION = "2026-07-28"
+HANDSHAKE_VERSION = "2025-11-25"
+EVIL_ORIGIN = "https://evil.example"
+
+
+# ---- Stub server instance ---------------------------------------------------
+
+
+class StubMCPServer:
+    """Stands in for ``GuaipecaMCPServer`` without the model or searcher."""
+
+    def __init__(self, auth_token: str | None = None, corpus_dir: str | None = None):
+        server_config = ServerConfig()
+        server_config.auth_token = auth_token
+        config = type("Config", (), {})()
+        config.server = server_config
+        config.corpora = [CorpusConfig(name="docs", path=corpus_dir)] if corpus_dir else []
+        config.get_corpus = lambda name: next(
+            (c for c in config.corpora if c.name == name), None
+        )
+        self.config = config
+        self.deleted: list[tuple[str, str]] = []
+
+    def _tools_with_corpus_enum(self) -> list[dict]:
+        return [dict(tool) for tool in TOOLS]
+
+    def _handle_tool_call(self, params: dict) -> dict:
+        name = params.get("name")
+        if name == "search":
+            return {
+                "content": [
+                    {"type": "text", "text": json.dumps({"result": "mock search result"})}
+                ]
+            }
+        if name == "get_chunk":
+            return {"isError": True, "content": [{"type": "text", "text": "Chunk not found"}]}
+        return {"isError": True, "content": [{"type": "text", "text": f"Unknown tool: {name}"}]}
+
+    def _handle_delete(self, corpus_name: str, filename: str, do_index: bool) -> dict:
+        self.deleted.append((corpus_name, filename))
+        return {"corpus": corpus_name, "filename": filename, "deleted": True, "indexed": False}
+
+
+# ---- Harness ----------------------------------------------------------------
+
+
+def _make_client(server: StubMCPServer | None = None, **app_kwargs) -> tuple[TestClient, StubMCPServer]:
+    stub = server or StubMCPServer()
+    app = build_app(stub.config, stub, **app_kwargs)
+    return TestClient(app, base_url="http://127.0.0.1:8090"), stub
+
+
+@pytest.fixture
+def client():
+    """App with auth off, lifespan entered for the test's duration."""
+    stub = StubMCPServer()
+    with _make_client(stub)[0] as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def auth_client():
+    """App with a configured Bearer token."""
+    stub = StubMCPServer(auth_token="test-secret-token")
+    with _make_client(stub)[0] as test_client:
+        yield test_client
+
+
+def _initialize(
+    client: TestClient, protocol_version: str = HANDSHAKE_VERSION, token: str | None = None
+) -> str:
+    """Legacy handshake on /mcp; returns the Mcp-Session-Id."""
+    headers = {"Accept": "application/json, text/event-stream"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": protocol_version,
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "1.0"},
+            },
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    session_id = response.headers.get("mcp-session-id")
+    assert session_id, f"no Mcp-Session-Id in {dict(response.headers)}"
+    return session_id
+
+
+# ---- 1. Legacy handshake + tools/list ---------------------------------------
+
+
+def test_legacy_initialize_then_tools_list(client):
+    session_id = _initialize(client)
+
+    response = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        headers={"Mcp-Session-Id": session_id},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["jsonrpc"] == "2.0"
+    assert body["id"] == 2
+    tools = body["result"]["tools"]
+    assert len(tools) == 10
+    assert {tool["name"] for tool in tools} == {tool["name"] for tool in TOOLS}
+    # The SDK serialises inputSchema under its wire alias, not input_schema.
+    assert all("inputSchema" in tool for tool in tools)
+
+
+def test_legacy_tools_call_runs_the_existing_dispatcher(client):
+    session_id = _initialize(client)
+
+    response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "search", "arguments": {"query": "embedding"}},
+        },
+        headers={"Mcp-Session-Id": session_id},
+    )
+
+    assert response.status_code == 200, response.text
+    content = response.json()["result"]["content"]
+    assert content[0]["type"] == "text"
+    assert json.loads(content[0]["text"]) == {"result": "mock search result"}
+
+
+# ---- 2. Modern (2026-07-28) stateless request -------------------------------
+
+
+def test_modern_stateless_tools_list(client):
+    response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/list",
+            "params": {
+                "_meta": {
+                    # The modern envelope carries namespaced keys, not bare ones.
+                    "io.modelcontextprotocol/protocolVersion": MODERN_VERSION,
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "modern-client",
+                        "version": "1.0",
+                    },
+                }
+            },
+        },
+        headers={
+            "MCP-Protocol-Version": MODERN_VERSION,
+            "mcp-method": "tools/list",
+            "Accept": "application/json, text/event-stream",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == 10
+    assert len(body["result"]["tools"]) == 10
+    # Stateless: no session is minted for the modern era.
+    assert "mcp-session-id" not in response.headers
+
+
+# ---- 3/4. Origin policy -----------------------------------------------------
+
+
+def test_evil_origin_rejected(client):
+    response = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+        headers={"Origin": EVIL_ORIGIN},
+    )
+    assert response.status_code == 403
+
+
+def test_loopback_origin_allowed(client):
+    session_id = _initialize(client)
+    response = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "ping"},
+        headers={"Origin": "http://localhost:3000", "Mcp-Session-Id": session_id},
+    )
+    assert response.status_code == 200
+
+
+def test_no_origin_allowed(client):
+    session_id = _initialize(client)
+    response = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "ping"},
+        headers={"Mcp-Session-Id": session_id},
+    )
+    assert response.status_code == 200
+    assert response.json()["result"] == {}
+
+
+def test_origin_patterns_follow_the_existing_policy():
+    loopback = _allowed_origin_patterns(None)
+    assert "http://localhost:*" in loopback
+    assert "http://127.0.0.1:*" in loopback
+    assert "https://[::1]:*" in loopback
+    # An allowlist replaces the loopback default, exactly as _origin_allowed().
+    assert _allowed_origin_patterns(["https://ui.example.com/"]) == ["https://ui.example.com"]
+    # Hosts are a different list: the Host header names the address connected to,
+    # so loopback hosts appear without a scheme.
+    assert "127.0.0.1:*" in _allowed_host_patterns("127.0.0.1", None)
+    assert "ui.example.com" in _allowed_host_patterns("127.0.0.1", ["https://ui.example.com"])
+
+
+# ---- 5. /health -------------------------------------------------------------
+
+
+def test_health(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "server": "guaipeca", "version": __version__}
+
+
+def test_health_requires_auth_when_configured(auth_client):
+    assert auth_client.get("/health").status_code == 401
+    response = auth_client.get("/health", headers={"Authorization": "Bearer test-secret-token"})
+    assert response.status_code == 200
+
+
+# ---- 6. /sse removal --------------------------------------------------------
+
+
+def test_get_sse_reports_removal(client):
+    response = client.get("/sse")
+    assert response.status_code == 410
+    body = response.json()
+    assert "/mcp" in body["use"]
+    assert "removed" in body["error"]
+
+
+def test_post_messages_reports_removal(client):
+    response = client.post("/messages?session_id=abc", json={"jsonrpc": "2.0", "id": 1})
+    assert response.status_code == 410
+    assert response.json()["use"] == "/mcp"
+
+
+# ---- 7. Auth on /mcp --------------------------------------------------------
+
+
+def test_mcp_without_token_is_401(auth_client):
+    response = auth_client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+    )
+    assert response.status_code == 401
+
+
+def test_mcp_with_token_succeeds(auth_client):
+    session_id = _initialize(auth_client, token="test-secret-token")  # raises on non-200
+    response = auth_client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "ping"},
+        headers={"Authorization": "Bearer test-secret-token", "Mcp-Session-Id": session_id},
+    )
+    assert response.status_code == 200
+
+
+def test_wrong_token_is_401(auth_client):
+    response = auth_client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+        headers={"Authorization": "Bearer wrong-token"},
+    )
+    assert response.status_code == 401
+
+
+# ---- Non-MCP endpoints: /tools and DELETE /documents ------------------------
+
+
+def test_tools_endpoint_matches_tools_list(client):
+    response = client.get("/tools")
+    assert response.status_code == 200
+    assert len(response.json()["tools"]) == 10
+
+
+def test_delete_documents_delegates_to_handler(client):
+    response = client.delete("/documents?corpus=docs&filename=a.md")
+    assert response.status_code == 200
+    assert response.json()["deleted"] is True
+
+
+def test_delete_documents_requires_parameters(client):
+    response = client.delete("/documents?corpus=docs")
+    assert response.status_code == 400
+
+
+def test_delete_documents_requires_auth(auth_client):
+    response = auth_client.delete("/documents?corpus=docs&filename=a.md")
+    assert response.status_code == 401
+
+
+# ---- Download route ---------------------------------------------------------
+
+
+def test_download_serves_file_from_corpus(tmp_path):
+    (tmp_path / "doc.md").write_text("hello", encoding="utf-8")
+    stub = StubMCPServer(corpus_dir=str(tmp_path))
+    with _make_client(stub)[0] as test_client:
+        response = test_client.get("/download/docs/doc.md")
+
+    assert response.status_code == 200
+    assert response.text == "hello"
+    assert response.headers["content-disposition"] == 'attachment; filename="doc.md"'
+
+
+def test_download_rejects_unknown_corpus(tmp_path):
+    stub = StubMCPServer(corpus_dir=str(tmp_path))
+    with _make_client(stub)[0] as test_client:
+        response = test_client.get("/download/nope/doc.md")
+    assert response.status_code == 404
+    assert "corpus not found" in response.json()["error"]

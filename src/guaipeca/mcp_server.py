@@ -821,10 +821,15 @@ class GuaipecaMCPServer:
     # ---- HTTP transport (MCP-compliant SSE) ----
 
     def run_http(self, host: str = "127.0.0.1", port: int = 8090):
-        """
-        Run MCP server over HTTP transport using Server-Sent Events.
+        """Run MCP server over HTTP transport using Server-Sent Events.
 
-        MCP HTTP transport:
+        RETIRED in the MCP SDK migration (Phase 4). ``run()`` now uses
+        ``run_http_sdk`` instead, so this method is unreachable from the CLI.
+        It is kept only until Phase 6 deletes the hand-rolled transport; the
+        ``raise`` below makes an accidental call fail loudly instead of
+        silently serving a transport with no SSE routes.
+
+        Original MCP HTTP transport:
         - GET /sse — opens an SSE stream, server sends an `endpoint` event with a POST URL
         - POST /messages?session_id=<id> — client sends JSON-RPC messages via POST
         - Server pushes responses back through the SSE stream
@@ -833,9 +838,13 @@ class GuaipecaMCPServer:
 
         If auth_token is configured, validates Authorization: Bearer <token> header.
         """
+        raise RuntimeError(
+            "run_http() was retired in the MCP SDK migration; use run_http_sdk() "
+            "(or run(transport='http')), which serves POST /mcp via the official SDK."
+        )
         import http.server
         import urllib.parse
-        from queue import Empty, Queue
+        from queue import Queue
 
         server_instance = self
         auth_token = self.config.server.auth_token
@@ -956,48 +965,30 @@ class GuaipecaMCPServer:
                 if not self._check_origin():
                     return
 
-                # SSE endpoint — opens a persistent event stream
-                if parsed.path == "/sse":
-                    if not self._check_auth():
-                        self._send_json(401, {"error": "unauthorized"})
-                        return
+                # Legacy SSE endpoints were removed in the MCP SDK migration.
+                # They used to be the SSE stream (/sse) and its message sink
+                # (/messages); both now answer 410 with a pointer to /mcp, as
+                # mcp_sdk.http's routes do on the live server.
+                if parsed.path in ("/sse", "/messages"):
+                    self._send_json(410, {
+                        "error": "legacy SSE transport removed",
+                        "message": (
+                            "The legacy SSE transport (GET /sse + POST /messages) was removed "
+                            "in the MCP SDK migration. Use POST /mcp instead: it serves both "
+                            "the session-based handshake and the 2026-07-28 stateless protocol."
+                        ),
+                        "use": "/mcp",
+                    })
+                    return
 
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/event-stream")
-                    self.send_header("Cache-Control", "no-cache")
-                    self.send_header("Connection", "keep-alive")
-                    self.send_header("Access-Control-Allow-Origin", self._cors_value())
+                # /mcp with a trailing slash: clients that build URLs by
+                # appending a path segment land here. Starlette's router
+                # redirects to /mcp (308); this route does the same.
+                if parsed.path == "/mcp/":
+                    self.send_response(308)
+                    self.send_header("Location", "/mcp")
+                    self.send_header("Content-Length", "0")
                     self.end_headers()
-
-                    # Create a new session
-                    session = MCPSession(self.client_address[0], transport="sse")
-                    with sessions_lock:
-                        sessions[session.session_id] = session
-                    logger.info(f"SSE session started: {session.session_id} from {self.client_address[0]}")
-
-                    # Send the endpoint event so the client knows where to POST messages
-                    self._send_sse_event("endpoint", session.post_endpoint)
-
-                    # Keep the SSE stream open and push responses as they arrive
-                    try:
-                        while session.active:
-                            try:
-                                response_data = session.response_queue.get(timeout=15)
-                                # Check if it's a close signal
-                                if response_data is None:
-                                    break
-                                self._send_sse_event("message", response_data)
-                            except Empty:
-                                # Send a comment as keepalive ping
-                                self.wfile.write(b": ping\n\n")
-                                self.wfile.flush()
-                    except (ConnectionError, BrokenPipeError):
-                        logger.info(f"SSE connection closed for session {session.session_id}")
-                    finally:
-                        session.active = False
-                        with sessions_lock:
-                            sessions.pop(session.session_id, None)
-                        logger.info(f"SSE session ended: {session.session_id}")
                     return
 
                 # Health check
@@ -1090,7 +1081,6 @@ class GuaipecaMCPServer:
 
             def do_POST(self):
                 parsed = urllib.parse.urlparse(self.path)
-                query_params = urllib.parse.parse_qs(parsed.query)
 
                 if not self._check_origin():
                     return
@@ -1337,39 +1327,19 @@ class GuaipecaMCPServer:
                     self.wfile.write(resp_body)
                     return
 
-                # Message endpoint — client sends JSON-RPC messages here
-                if parsed.path == "/messages":
-                    if not self._check_auth():
-                        self._send_json(401, {"error": "unauthorized"})
-                        return
-
-                    session_id = query_params.get("session_id", [None])[0]
-                    with sessions_lock:
-                        if not session_id or session_id not in sessions:
-                            self._send_json(400, {
-                                "jsonrpc": "2.0",
-                                "id": None,
-                                "error": {"code": -32000, "message": "invalid or missing session_id"},
-                            })
-                            return
-                        session = sessions[session_id]
-
-                    content_length = int(self.headers.get("Content-Length", 0))
-                    # Enforce configurable max body size to prevent memory exhaustion
-                    if content_length > max_body_size:
-                        self._send_json(413, {"error": "request body too large"})
-                        return
-                    body = self.rfile.read(content_length) if content_length > 0 else b"{}"
-
-                    # Accept the request immediately (202 Accepted)
-                    self.send_response(202)
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
-
-                    # Process the request and push the response through SSE
-                    response = server_instance._process_jsonrpc(body)
-                    if response is not None:
-                        session.response_queue.put(json.dumps(response))
+                # Legacy SSE message sink was removed with GET /sse (MCP SDK
+                # migration). Answer with the same 410 so an old client sees a
+                # pointer to /mcp instead of a 404 that looks like a typo.
+                if parsed.path in ("/sse", "/messages"):
+                    self._send_json(410, {
+                        "error": "legacy SSE transport removed",
+                        "message": (
+                            "The legacy SSE transport (GET /sse + POST /messages) was removed "
+                            "in the MCP SDK migration. Use POST /mcp instead: it serves both "
+                            "the session-based handshake and the 2026-07-28 stateless protocol."
+                        ),
+                        "use": "/mcp",
+                    })
                     return
 
                 # Unknown POST path
@@ -1577,12 +1547,25 @@ class GuaipecaMCPServer:
         logger.info("Starting Guaipeca MCP server (stdio, mcp SDK)")
         asyncio.run(_run_sdk_stdio(self.config, self))
 
+    def run_http_sdk(self, host: str = "127.0.0.1", port: int = 8090):
+        """Run the HTTP transport through the official SDK (Phase 4 cutover).
+
+        ``mcp_sdk.http.serve`` owns port-retry, uvicorn and shutdown; the
+        non-MCP endpoints (/health, /tools, downloads, DELETE /documents) are
+        Starlette routes on the same app. ``run_http`` is retained but
+        unreachable until Phase 6 removes it.
+        """
+        from .mcp_sdk.http import serve as _serve_http
+
+        logger.info("Starting Guaipeca MCP server (HTTP, mcp SDK)")
+        _serve_http(self.config, self, host, port)
+
     def run(self, transport: str = "both", host: str = "127.0.0.1", port: int = 8090):
         """Run the server with the specified transport(s)."""
         if transport == "stdio":
             self.run_sdk_stdio()
         elif transport == "http":
-            self.run_http(host, port)
+            self.run_http_sdk(host, port)
         elif transport == "both":
             # Run stdio in a daemon thread, HTTP in main. The stdio side is an
             # asyncio loop owned entirely by that worker thread (see
@@ -1590,6 +1573,6 @@ class GuaipecaMCPServer:
             # or signal handling.
             stdio_thread = threading.Thread(target=self.run_sdk_stdio, daemon=True)
             stdio_thread.start()
-            self.run_http(host, port)
+            self.run_http_sdk(host, port)
         else:
             raise ValueError(f"Unknown transport: {transport}")

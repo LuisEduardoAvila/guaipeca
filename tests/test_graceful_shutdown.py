@@ -92,10 +92,22 @@ GuaipecaMCPServer.handle_request = _patched_handle_request
 
 class FakeConfig:
     def __init__(self):
-        self.server = type("server", (), {{"auth_token": None}})()
+        self.server = type(
+            "server",
+            (),
+            {{
+                "auth_token": None,
+                "host": "127.0.0.1",
+                "port": {port},
+                "max_body_size": 73400320,
+                "allowed_origins": None,
+            }},
+        )()
 
-server = GuaipecaMCPServer(FakeConfig())
-server.run_http("127.0.0.1", {port})
+from guaipeca.mcp_sdk.http import serve
+
+config = FakeConfig()
+serve(config, GuaipecaMCPServer(config), "127.0.0.1", {port})
 """
 
 
@@ -147,10 +159,15 @@ class TestGracefulShutdown:
                     f"{signal.Signals(sig).name} (elapsed={elapsed:.1f}s)"
                 )
 
-            assert rc == 0, (
-                f"Unexpected exit code {rc} (expected 0 from os._exit(0), "
-                f"elapsed={elapsed:.1f}s)"
+            # uvicorn's own SIGTERM/SIGINT handling shuts down gracefully and
+            # the process dies from the signal rather than calling os._exit(0).
+            # What matters is that it exits promptly and releases the port,
+            # not which of those two mechanisms it used.
+            assert rc in (0, -sig), (
+                f"Unexpected exit code {rc} after {signal.Signals(sig).name} "
+                f"(expected 0 or -{int(sig)}), elapsed={elapsed:.1f}s"
             )
+            assert elapsed < 10, f"Shutdown took {elapsed:.1f}s"
 
             # Verify the port is released
             time.sleep(0.5)  # Give the OS a moment to free the socket

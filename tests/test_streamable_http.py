@@ -9,8 +9,23 @@ R3 RULING: /mcp requires protocolVersion >= 2025-03-26. 2024-11-05 is rejected
 on /mcp but still honoured on legacy /sse.
 """
 
+
+
 from __future__ import annotations
 
+# SUPERSEDED by Phase 4 of the MCP SDK migration (design/mcp-sdk-migration-plan.md).
+# These tests drive GuaipecaMCPServer.run_http(), the hand-rolled ThreadingHTTPServer
+# transport, which no longer serves - HTTP is now mcp_sdk/http.py on uvicorn.
+# The behaviour they assert has equivalents in tests/test_mcp_sdk_http.py, EXCEPT
+# the cases listed in the Phase 5 assertion-mapping table (dead-session 404,
+# /mcp trailing slash, batch arrays, malformed request line, 413). Skipped rather
+# than deleted so nothing is lost before that mapping is reviewed.
+# Phase 5 ports the surviving assertions and then removes this file.
+import pytest as _pytest
+
+pytestmark = _pytest.mark.skip(
+    reason="hand-rolled HTTP transport removed in Phase 4; see tests/test_mcp_sdk_http.py"
+)
 import json
 import socket
 import threading
