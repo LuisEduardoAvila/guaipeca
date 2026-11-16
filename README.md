@@ -33,7 +33,7 @@ Proven on a Raspberry Pi 5 (8GB RAM, ARM64) alongside other services. If it runs
 - **Embedding cache (LRU + TTL)** — 10K-entry LRU cache with 1hr TTL, memory-pressure aware eviction via psutil
 - **Content preprocessing** — heading + first 500 chars sent to embedder for better semantic signal; full text stored in metadata
 - **Concurrent** — read-write lock allows multiple simultaneous searches, exclusive indexing
-- **Runs anywhere** — ARM64 (Pi 5, ARM servers), x86_64 (laptops, VMs, dedicated servers), any Linux box with Python 3.12+. Proven on Pi 5 with ~90MB model + ~20MB FAISS
+- **Runs anywhere** — ARM64 (Pi 5, ARM servers), x86_64 (laptops, VMs, dedicated servers), any Linux box with Python 3.12+ (3.13 recommended, and what the Docker image and Pi deployment run). Proven on Pi 5 with Python 3.13, ~90MB model + ~20MB FAISS
 - **Optional auth** — Bearer token authentication for HTTP transport
 
 ## Quick Start
@@ -347,7 +347,7 @@ sudo systemctl start guaipeca    # start now
 ```bash
 systemctl status guaipeca
 curl http://127.0.0.1:8090/health
-# → {"status": "ok", "server": "guaipeca", "version": "0.3.3"}
+# → {"status": "ok", "server": "guaipeca", "version": "0.4.0"}
 ```
 
 ### 4. Check logs

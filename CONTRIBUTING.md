@@ -38,7 +38,7 @@ Tests use a sample PDF fixture (`tests/fixtures/test-doc.pdf`) with content abou
 
 - **Linter:** [ruff](https://github.com/astral-sh/ruff)
 - **Line length:** 100 characters
-- **Target:** Python 3.10+
+- **Target:** Python 3.12+ (3.13 recommended — this is what the Docker image and the Pi deployment run)
 
 ```bash
 # Check

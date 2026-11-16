@@ -1,5 +1,5 @@
 # ─── Stage 1: Builder ────────────────────────────────────────────
-FROM python:3.12-slim AS builder
+FROM python:3.13-slim AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -31,7 +31,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -e ".[pdf,docx,pptx,xlsx,monitor]"
 
 # ─── Stage 2: Runtime ────────────────────────────────────────────
-FROM python:3.12-slim AS runtime
+FROM python:3.13-slim AS runtime
 
 # Install runtime system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
