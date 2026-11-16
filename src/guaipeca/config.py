@@ -15,6 +15,60 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
+# Encodings tried when reading a config file, in order. UTF-8 is the only
+# encoding this project writes; the others exist so a file produced by another
+# tool (Notepad, a Windows editor, an agent on a cp1252 default) still loads
+# instead of failing with a traceback from inside PyYAML.
+_CONFIG_ENCODINGS = ("utf-8-sig", "cp1252")
+
+
+def _read_config_text(path: str) -> str:
+    """Read a YAML config as text, tolerating common Windows encodings.
+
+    UTF-8 (with or without a BOM) is read silently. Any other encoding that
+    decodes cleanly produces a warning naming the encoding, the file, and how
+    to fix it, because a mis-encoded config will still break other tools that
+    touch the same file.
+
+    Raises:
+        ValueError: if the file cannot be decoded by any known encoding.
+    """
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        raise ValueError(f"Cannot read config file {path}: {e}") from e
+
+    for encoding in _CONFIG_ENCODINGS:
+        try:
+            text = raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        if encoding != "utf-8-sig":
+            logger.warning(
+                "Config file %s is not UTF-8; decoded as %s. Re-save it as UTF-8 "
+                "to avoid problems in other tools.",
+                path,
+                encoding,
+            )
+        return text
+
+    # Report the offset from a strict UTF-8 attempt: that is the error a user
+    # is most likely to hit, and the one whose position they can act on.
+    try:
+        raw.decode("utf-8")
+        # Unreachable: non-UTF-8 input failed above.
+        raise AssertionError("decode should have failed")
+    except UnicodeDecodeError as e:
+        byte = raw[e.start]
+        raise ValueError(
+            f"Config file {path} is not valid UTF-8: byte 0x{byte:02x} at offset "
+            f"{e.start} (line {raw[:e.start].count(b'\\n') + 1}). This usually means "
+            "the file was saved as Windows-1252 with non-ASCII characters "
+            "(smart quotes, em dashes, accented letters). Re-save it as UTF-8."
+        ) from e
+
+
 @dataclass
 class CorpusConfig:
     """A single document corpus definition."""
@@ -134,8 +188,8 @@ class GuaipecaConfig:
     def from_yaml(cls, path: str) -> GuaipecaConfig:
         """Load config from a YAML file."""
         path = os.path.expanduser(path)
-        with open(path, "r") as f:
-            data = yaml.safe_load(f)
+        text = _read_config_text(path)
+        data = yaml.safe_load(text)
 
         if not data:
             raise ValueError(f"Empty config file: {path}")
