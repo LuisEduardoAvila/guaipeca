@@ -124,12 +124,20 @@ search:
 | `http` | MCP over Streamable HTTP (`POST /mcp`) plus the non-MCP endpoints (`/health`, `/tools`, `/download/...`, `DELETE /documents`). For a daemon serving the network. |
 | `both` (default) | stdio when launched as a subprocess, HTTP when launched as a daemon. This is **not** two simultaneous listeners — the MCP SDK runs one server per transport, so `both` picks one based on how the process was started. |
 
-`sse` is no longer a valid value. The legacy `/sse` + `/messages` transport was
-removed in the MCP SDK migration; `transport: http` now serves `POST /mcp` for
-both protocol eras (the older session-based handshake and the newer stateless
-requests), so there is nothing left for a separate SSE setting to select. A
-config still set to `transport: sse` fails validation with an error pointing at
-`http`.
+`sse` is not a valid value. The legacy SSE transport is served by `transport: http`
+alongside Streamable HTTP — it is not selectable on its own, because there is
+nothing to select: the SSE routes are always mounted on the same port.
+`transport: http` serves `POST /mcp` for both protocol eras (the older
+session-based handshake and the newer stateless requests) **and** `GET /sse` +
+`POST /messages`. A config still set to `transport: sse` fails validation with
+an error pointing at `http`.
+
+`POST /mcp` is the preferred transport. The server says so in three places, so
+a client finds it whichever path it takes: the MCP `initialize` `instructions`,
+the `/tools` response (`transports.preferred`), and a `Deprecation: true` +
+`Link: </mcp>` header on the `GET /sse` stream. SSE is kept for clients that
+cannot use Streamable HTTP; it is deprecated upstream and will be removed in a
+future release.
 
 ## Embedding Models
 
@@ -560,7 +568,7 @@ See `docs/container-deployment.md` for detailed VM deployment instructions.
   - `POST /mcp` — Streamable HTTP transport (MCP protocol version `2025-11-25`); JSON-RPC request in, JSON-RPC response inline. `initialize` issues an `Mcp-Session-Id` header used on subsequent requests. Modern clients should prefer this endpoint. A client may send `MCP-Protocol-Version` on subsequent requests; an absent header is treated as the `2025-03-26` baseline, an unknown value gets `400`.
   - `DELETE /mcp` — terminate a Streamable HTTP session (send the `Mcp-Session-Id` header)
   - `GET /mcp` — returns `405 Method Not Allowed` (Guaipeca has no server-initiated messages; use `POST /mcp`)
-  - `GET /sse`, `POST /messages` — **removed**, return `410 Gone`. Use `POST /mcp`.
+  - `GET /sse`, `POST /messages` — legacy SSE transport, still served but **deprecated**. Use `POST /mcp` instead; the stream carries `Deprecation: true` and a `Link` header pointing at `/mcp`.
   - `GET /health` — health check
   - `GET /tools` — list available tools
   - `GET /download/{corpus}/{filename}` — download original file (requires auth, path traversal protected)

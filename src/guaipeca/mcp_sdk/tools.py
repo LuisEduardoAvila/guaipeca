@@ -99,6 +99,18 @@ def build_server(config: GuaipecaConfig, server_instance: GuaipecaMCPServer) -> 
     return Server(
         "guaipeca",
         version=__version__,
+        # The MCP-standard place to guide clients: delivered in the
+        # initialize result, so a connecting client reads it before choosing
+        # a transport. Transport preference lives here rather than in docs
+        # nobody reads.
+        instructions=(
+            "Guaipeca serves MCP over Streamable HTTP at POST /mcp. Prefer it: "
+            "one endpoint, both protocol eras (2025-11-25 handshake and "
+            "2026-07-28 stateless), no persistent connection to hold open. "
+            "The legacy SSE transport (GET /sse + POST /messages) is still "
+            "served for clients that cannot use /mcp, but it is deprecated "
+            "upstream and will be removed in a future release."
+        ),
         on_list_tools=on_list_tools,
         on_call_tool=on_call_tool,
     )

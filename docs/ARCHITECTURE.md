@@ -256,7 +256,7 @@ Ten tools are exposed:
 ### Transports
 
 - **stdio** — Newline-delimited JSON-RPC over stdin/stdout, via the `mcp` SDK's `stdio_server`. Used for local LLM integration.
-- **Legacy SSE — removed.** `GET /sse` and `POST /messages` now return `410 Gone` with an explanatory body. The transport was deprecated upstream and carried its own session/queue machinery; `/mcp` serves both protocol eras on one endpoint instead.
+- **Legacy SSE — still served, deprecated.** `GET /sse` opens the event stream and `POST /messages?session_id=...` carries requests, via the SDK's `MCPServer.sse_app()` built around the same low-level `Server` as `/mcp` (one tool registry, two transports). The stream response carries `Deprecation: true` and `Link: </mcp>; rel="alternate"`, and `initialize` instructions plus `/tools` both name Streamable HTTP as preferred. Kept for clients that cannot use `/mcp`; upstream has deprecated the transport, so it will be removed in a future release.
 - **Streamable HTTP** — MCP Streamable HTTP transport (protocol `2025-11-25`), responses returned inline:
   - `POST /mcp` — JSON-RPC request in, JSON-RPC response out inline (`200`, `Content-Type: application/json`). `initialize` issues an `Mcp-Session-Id` response header; subsequent requests must send it. Notifications get `202` with an empty body; batch (JSON array) requests return a JSON array of responses. Requires protocol version `2025-03-26` or later. A `MCP-Protocol-Version` header is optional on post-initialize requests (absent is treated as the `2025-03-26` baseline); a present but unknown value returns `400`.
   - `DELETE /mcp` — Terminates a session (`Mcp-Session-Id` header required), returning `200`

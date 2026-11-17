@@ -598,3 +598,56 @@ def test_sse_endpoint_does_not_redirect_post(client):
         assert post.status_code == 202, (
             f"expected 202 Accepted from a live session, got {post.status_code}"
         )
+
+
+# ---- 8. Transport advertisement ---------------------------------------------
+
+
+def test_tools_endpoint_advertises_preferred_transport(client):
+    """/tools must say which transport is preferred, not just list tools."""
+    body = client.get("/tools").json()
+    assert "tools" in body
+    transports = body["transports"]
+    assert transports["preferred"] == "streamable-http"
+    assert transports["endpoints"]["streamable-http"] == "/mcp"
+    # SSE is advertised as still-served, not as the preferred path.
+    assert "sse" in transports["endpoints"]
+    assert "deprecated" in transports["note"].lower()
+
+
+def test_initialize_instructions_prefer_streamable_http(client):
+    """The MCP-standard channel: a client reads this before it picks a transport."""
+    response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": HANDSHAKE_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "t", "version": "1"},
+            },
+        },
+        headers={"Accept": "application/json, text/event-stream"},
+    )
+    assert response.status_code == 200, response.text
+    instructions = response.json()["result"].get("instructions") or ""
+    assert "/mcp" in instructions
+    assert "prefer" in instructions.lower()
+    assert "deprecated" in instructions.lower()
+
+
+def test_sse_stream_is_marked_deprecated(client):
+    """A legacy SSE client never reads `instructions`, so the stream says so.
+
+    RFC 8594 Deprecation + RFC 8288 Link. Only the GET stream carries them:
+    that is where a client decides to keep the connection.
+    """
+    with client.stream(
+        "GET", "/sse", headers={"Accept": "text/event-stream"}
+    ) as response:
+        assert response.status_code == 200
+        assert response.headers.get("deprecation") == "true", dict(response.headers)
+        link = response.headers.get("link", "")
+        assert "/mcp" in link, link

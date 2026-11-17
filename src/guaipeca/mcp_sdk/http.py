@@ -297,9 +297,11 @@ def _build_sse_app(
     guards the private attribute so an SDK upgrade fails loudly instead of
     silently losing ``/sse``.
 
-    ``message_path`` is ``/messages`` without the trailing slash: that is the
-    URL the hand-rolled server used, and a stale client must not receive a
-    404 when it replays its old endpoint.
+    ``message_path`` is ``/messages/`` *with* the trailing slash: the SDK routes
+    it as a Starlette ``Mount``, so ``/messages`` answers with a 307 and most
+    SSE clients drop the request body rather than follow a redirect on POST.
+    See :func:`_build_sse_app`'s inline comment and
+    ``test_sse_endpoint_does_not_redirect_post``.
 
     The returned app carries no Bearer check of its own; ``build_app`` passes it
     through :func:`_guard_asgi` before merging its routes.
@@ -325,7 +327,9 @@ def _build_sse_app(
     )
 
 
-def _guard_asgi(endpoint: Any, auth_token: str | None) -> Any:
+def _guard_asgi(
+    endpoint: Any, auth_token: str | None, *, deprecation_headers: bool = False
+) -> Any:
     """Require our Bearer token in front of a single ASGI callable.
 
     ``sse_app()`` is built by the SDK outside ``build_app``'s auth
@@ -334,9 +338,35 @@ def _guard_asgi(endpoint: Any, auth_token: str | None) -> Any:
     A request without a valid token is answered with our usual 401 body before
     the SSE transport sees it. No token configured means no wrapper, matching
     the other custom routes.
+
+    ``deprecation_headers`` marks the response as deprecated and points at the
+    preferred endpoint (RFC 8594 ``Deprecation`` + RFC 8288 ``Link``). A legacy
+    SSE client never reads the MCP ``initialize`` instructions, so this response
+    is the only place it can be told. Headers are added when the SSE stream
+    starts, not on every POST, because that is where a client decides to keep
+    the connection.
     """
+
+    async def _send_deprecated(send: Any) -> Any:
+        async def _wrapped(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                if not any(k.lower() == b"deprecation" for k, _ in headers):
+                    headers.append((b"deprecation", b"true"))
+                    headers.append((b"link", b'</mcp>; rel="alternate"; type="application/json"'))
+                    message = {**message, "headers": headers}
+            await send(message)
+
+        return _wrapped
+
     if not auth_token:
-        return endpoint
+        if not deprecation_headers:
+            return endpoint
+
+        async def _plain(scope: Any, receive: Any, send: Any) -> None:
+            await endpoint(scope, receive, await _send_deprecated(send))
+
+        return _plain
 
     async def _guarded(scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -346,6 +376,8 @@ def _guard_asgi(endpoint: Any, auth_token: str | None) -> Any:
         if not _check_bearer(request, auth_token):
             await _unauthorized()(scope, receive, send)
             return
+        if deprecation_headers:
+            send = await _send_deprecated(send)
         await endpoint(scope, receive, send)
 
     return _guarded
@@ -367,7 +399,26 @@ def _tools(server_instance: GuaipecaMCPServer):
             return _unauthorized()
         # Same list the SDK advertises: _tools_with_corpus_enum() is what
         # build_server()'s tools/list handler returns.
-        return JSONResponse({"tools": server_instance._tools_with_corpus_enum()})
+        return JSONResponse(
+            {
+                "tools": server_instance._tools_with_corpus_enum(),
+                # Transport facts for a human or a client that probes here
+                # before connecting. The same preference is also in the MCP
+                # initialize `instructions` for clients that never read this.
+                "transports": {
+                    "preferred": "streamable-http",
+                    "endpoints": {
+                        "streamable-http": "/mcp",
+                        "sse": "/sse",
+                    },
+                    "note": (
+                        "Use POST /mcp. It serves both protocol eras on one "
+                        "endpoint. The legacy SSE transport is served for "
+                        "compatibility and is deprecated upstream."
+                    ),
+                },
+            }
+        )
 
     return _handler
 
@@ -536,7 +587,12 @@ def build_app(
     # the Starlette. Guarding per route keeps each endpoint's own semantics and
     # applies the Bearer check that sse_app() does not put on these two paths.
     for route in getattr(sse_app, "routes", ()):
-        route.app = _guard_asgi(route.app, auth_token)
+        # Only the GET stream is marked deprecated: that is where a client
+        # chooses to keep the connection. /messages carries the per-request
+        # POSTs of a session already opened here, and repeated headers on
+        # those would say nothing new.
+        is_stream = getattr(route, "path", None) == "/sse"
+        route.app = _guard_asgi(route.app, auth_token, deprecation_headers=is_stream)
         app.routes.append(route)
 
     return _CorsMiddleware(app, auth_token, allowed_origins)
