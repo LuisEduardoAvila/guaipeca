@@ -311,6 +311,21 @@ def _build_sse_app(
     wrapper = MCPServer("guaipeca")
     # Intentional: reuse the Server built by build_server(), with Guaipeca's
     # tools, instead of a fresh one with only the SDK's defaults.
+    #
+    # Check BEFORE assigning. ``MCPServer.__init__`` sets this attribute itself,
+    # and the class has no ``__slots__``, so on a release that renamed it our
+    # assignment would silently create a new unused attribute: ``sse_app()``
+    # would drive the SDK's own default server and /sse would serve ZERO tools,
+    # with no error at startup or at request time. Testing for the attribute's
+    # existence up front catches a rename whether or not assignment succeeds.
+    if not hasattr(wrapper, "_lowlevel_server"):
+        raise RuntimeError(
+            "MCPServer no longer sets '_lowlevel_server' in __init__, so the "
+            "SDK's private hook has been renamed or removed. Guaipeca's SSE "
+            "transport would serve an empty tool list rather than fail. Update "
+            "_build_sse_app() to use the SDK's new hook (see issue #25); do not "
+            "drop this check."
+        )
     wrapper._lowlevel_server = lowlevel_server
     return wrapper.sse_app(
         sse_path="/sse",

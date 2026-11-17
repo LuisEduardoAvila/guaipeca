@@ -20,7 +20,16 @@ dependencies = [
     "markitdown>=0.0.1",
     "pymupdf>=1.24.0",
     "bm25s>=0.2.0",
-    "mcp>=2.3.0",
+    # Hard pin, deliberately not a range. guaipeca/mcp_sdk/http.py injects our
+    # tool Server through MCPServer._lowlevel_server, which is private API with
+    # no public equivalent (see issue #25). MCPServer has no __slots__, so on a
+    # release that renames that attribute our assignment would still succeed,
+    # sse_app() would drive the SDK's own empty server, and /sse would serve
+    # zero tools with no error anywhere. Silent capability loss is the failure
+    # mode a version range would invite, so a rebuild cannot pull another
+    # version in: bump this line on purpose, run the suite, and the runtime
+    # guard in _build_sse_app plus the guard tests will catch a moved hook.
+    "mcp==2.3.0",
 ]
 
 [project.optional-dependencies]
