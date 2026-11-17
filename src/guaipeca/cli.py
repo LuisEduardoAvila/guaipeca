@@ -63,6 +63,7 @@ SEARCH_PROP_TO_CLI_DEST = {
     "max_chars": "max_chars",
     "section_mode": "section_mode",
     "section_filter": "section_filter",
+    "max_distance": "max_distance",
 }
 
 
@@ -146,6 +147,12 @@ def cmd_index(args):
         sys.exit(1)
     elif "corpora" in result:
         for stats in result["corpora"]:
+            # A per-corpus failure dict has no files_indexed/chunks_created
+            # keys; printing it unguarded raised KeyError and tracebacked
+            # exactly when the error was meant to be made visible.
+            if stats.get("error"):
+                print(f"Error: {stats['error']}", file=sys.stderr)
+                continue
             print(f"\n[{stats['corpus']}]")
             print(f"  Files indexed: {stats['files_indexed']}")
             print(f"  Chunks created: {stats['chunks_created']}")
@@ -182,6 +189,7 @@ def cmd_search(args):
         max_chars=args.max_chars,
         section_mode=args.section_mode,
         section_filter=args.section_filter,
+        max_distance=args.max_distance,
     )
 
     if "error" in result:
@@ -190,6 +198,12 @@ def cmd_search(args):
 
     print(f"\nQuery: {result['query']}")
     print(f"Results: {result['total']}")
+    if result.get("filtered_by_distance") is not None:
+        print(f"Filtered by max_distance: {result['filtered_by_distance']}")
+    if result.get("max_distance_applied"):
+        # Empty results under an active floor are a success, not a failure:
+        # say so, or the user will look for a broken index.
+        print("Relevance floor applied: no chunk met max_distance")
     if result.get('hybrid'):
         print("Mode: hybrid (BM25 + FAISS)")
     if result.get('section_mode'):
@@ -256,6 +270,11 @@ def cmd_status(args):
     print(f"  Embedding model: {status['embedding_model']}")
     print(f"  Dimensions: {status['dimensions']}")
     print(f"  Hybrid search: {'enabled' if status.get('hybrid_enabled') else 'disabled'}")
+    global_floor = status.get("max_distance")
+    print(
+        "  Global max distance: "
+        + ("disabled" if global_floor is None else f"{global_floor:g} (1 - cosine)")
+    )
     print("\n  Corpora:")
     for c in status["corpora"]:
         print(f"    [{c['corpus']}]")
@@ -267,6 +286,11 @@ def cmd_status(args):
         # MCP status tool; omitting it here made the CLI and MCP disagree.
         bm25 = "available" if c.get("bm25_available") else "unavailable"
         print(f"      BM25 index: {bm25}")
+        # The active relevance floor: a missing result should be attributable to
+        # filtering here rather than blamed on a broken index.
+        floor = c.get("max_distance")
+        floor_text = "disabled" if floor is None else f"{floor:g} (1 - cosine)"
+        print(f"      Max distance: {floor_text}")
     print()
 
 
@@ -477,6 +501,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--section-filter",
         default=None,
         help="Restrict search to a section ID or heading path prefix",
+    )
+    p_search.add_argument(
+        "--max-distance",
+        type=float,
+        default=None,
+        help=(
+            "Relevance floor for dense hits, as 1 - cosine similarity "
+            "(omit to use config; lower = stricter)"
+        ),
     )
     p_search.set_defaults(func=cmd_search)
 

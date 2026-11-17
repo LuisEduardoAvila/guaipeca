@@ -67,6 +67,7 @@ class Searcher:
         section_mode: bool = False,
         section_filter: str | None = None,
         dedup_sections: bool = False,
+        max_distance: float | None = None,
     ) -> dict:
         """
         Search across corpora.
@@ -83,9 +84,15 @@ class Searcher:
             dedup_sections: If True, collapse results sharing a section_id, keeping only
                 the best-scoring chunk per section. Improves diversity by preventing
                 near-duplicate chunks from the same section crowding the results.
+            max_distance: Relevance floor for dense hits, as 1 - cosine similarity.
+                None = use the corpus/search config value, if any. Dense hits are
+                filtered BEFORE RRF fusion so off-topic chunks cannot pollute the
+                per-set min-max normalisation. BM25-only hits are never filtered.
 
         Returns:
-            Dict with results, total, query, return_mode.
+            Dict with results, total, query, return_mode. When a relevance floor was
+            active and nothing survived it, an empty SUCCESS with
+            ``max_distance_applied`` and ``filtered_by_distance``.
         """
         # Validate top_k
         if top_k < 1:
@@ -148,6 +155,7 @@ class Searcher:
                 query, top_k=top_k,
                 corpora=search_corpora, hybrid=use_hybrid,
                 section_filter=section_filter,
+                max_distance=max_distance,
             )
 
         # Embed query (always needed for dense search)
@@ -156,12 +164,19 @@ class Searcher:
         # Search each corpus (get top_k from each, then merge)
         all_results = []
         per_corpus_k = top_k * 2  # over-fetch for better merge
+        filtered_by_distance = 0
+        floor_active = False
 
         if use_hybrid:
             # Hybrid mode: run both dense and BM25, fuse with RRF
             for name in search_corpora:
                 corpus_idx = self.corpora[name]
+                floor = self._resolve_max_distance(name, max_distance)
                 dense_results = corpus_idx.search(query_vector, top_k=per_corpus_k)
+                if floor is not None:
+                    floor_active = True
+                    dense_results, dropped = self._filter_by_distance(dense_results, floor)
+                    filtered_by_distance += dropped
                 sparse_results = corpus_idx.search_bm25(query, top_k=per_corpus_k)
                 fused = self._rrf_fuse(dense_results, sparse_results, top_k=per_corpus_k)
                 all_results.extend(fused)
@@ -169,7 +184,12 @@ class Searcher:
             # Dense-only mode (original behavior)
             for name in search_corpora:
                 corpus_idx = self.corpora[name]
+                floor = self._resolve_max_distance(name, max_distance)
                 results = corpus_idx.search(query_vector, top_k=per_corpus_k)
+                if floor is not None:
+                    floor_active = True
+                    results, dropped = self._filter_by_distance(results, floor)
+                    filtered_by_distance += dropped
                 all_results.extend(results)
 
         # Sort by weighted score (descending)
@@ -187,6 +207,29 @@ class Searcher:
         # Trim to top_k
         final = all_results[:top_k]
 
+        # An all-filtered search is an empty SUCCESS: nothing passed the floor,
+        # so there is no least-bad chunk to fall back to. The envelope says the
+        # floor was active and how many hits it removed, so an empty result can
+        # be attributed to filtering rather than to a broken index.
+        if floor_active and not all_results:
+            return {
+                "results": [],
+                "total": 0,
+                "query": query,
+                "max_distance_applied": True,
+                "filtered_by_distance": filtered_by_distance,
+            }
+
+        # A partial filter is the common case, and it must be visible too: a
+        # shrunk result set with no explanation is indistinguishable from a
+        # query that simply matched less. Merged into every envelope below
+        # when a floor was active, so `total` can be attributed to filtering.
+        floor_keys = (
+            {"max_distance_applied": True, "filtered_by_distance": filtered_by_distance}
+            if floor_active
+            else {}
+        )
+
         # If section_mode is True, aggregate results by section (Phase 2)
         if section_mode:
             return self._aggregate_sections(final, query, use_hybrid)
@@ -200,6 +243,7 @@ class Searcher:
                 "query": query,
                 "hybrid": use_hybrid,
                 "return_mode": "documents",
+                **floor_keys,
             }
         elif return_mode == "auto":
             chunks_size = self._estimate_chunks_size(final)
@@ -210,6 +254,7 @@ class Searcher:
                     "query": query,
                     "hybrid": use_hybrid,
                     "return_mode": "chunks",
+                    **floor_keys,
                 }
             else:
                 final = self._collapse_to_documents(final)
@@ -219,6 +264,7 @@ class Searcher:
                     "query": query,
                     "hybrid": use_hybrid,
                     "return_mode": "documents",
+                    **floor_keys,
                 }
         else:
             # chunks mode (default)
@@ -228,7 +274,39 @@ class Searcher:
                 "query": query,
                 "hybrid": use_hybrid,
                 "return_mode": "chunks",
+                **floor_keys,
             }
+
+    def _resolve_max_distance(self, corpus_name: str, requested: float | None) -> float | None:
+        """Effective relevance floor for one corpus.
+
+        Precedence: the corpus's own ``max_distance``, then the per-call value,
+        then the global ``search.max_distance``. None everywhere means no floor.
+        """
+        corpus_cfg = self.config.get_corpus(corpus_name)
+        if corpus_cfg is not None and corpus_cfg.max_distance is not None:
+            return corpus_cfg.max_distance
+        if requested is not None:
+            return requested
+        return self.config.search.max_distance
+
+    @staticmethod
+    def _filter_by_distance(
+        dense_results: list[dict], max_distance: float
+    ) -> tuple[list[dict], int]:
+        """Drop dense hits below the relevance floor.
+
+        Keep hits whose cosine similarity is at least ``1 - max_distance``.
+        ``raw_score`` is the cosine similarity (inner product over unit
+        vectors), so the comparison is exact. Hits with no ``raw_score`` are
+        kept: they did not come from the dense index.
+
+        Returns:
+            (kept results, number dropped).
+        """
+        cutoff = 1.0 - max_distance
+        kept = [r for r in dense_results if r.get("raw_score", 1.0) >= cutoff]
+        return kept, len(dense_results) - len(kept)
 
     def _rrf_fuse(
         self,
@@ -532,6 +610,7 @@ class Searcher:
         corpora: list[str],
         hybrid: bool,
         section_filter: str,
+        max_distance: float | None = None,
     ) -> dict:
         """Search restricted to a specific section (Phase 4).
 
@@ -541,6 +620,7 @@ class Searcher:
             corpora: List of corpus names to search.
             hybrid: Whether to use hybrid BM25+FAISS.
             section_filter: Section ID or heading_path prefix to filter by.
+            max_distance: Relevance floor for dense hits (see :meth:`search`).
 
         Returns:
             Dict with results, total, query, section_filter.
@@ -549,10 +629,17 @@ class Searcher:
 
         all_results = []
         section_found = False
+        filtered_by_distance = 0
+        floor_active = False
 
         for name in corpora:
             corpus_idx = self.corpora[name]
+            floor = self._resolve_max_distance(name, max_distance)
             results = corpus_idx.search_section(query_vector, section_filter, top_k=top_k)
+            if floor is not None:
+                floor_active = True
+                results, dropped = self._filter_by_distance(results, floor)
+                filtered_by_distance += dropped
             if results:
                 section_found = True
             # Also try BM25 if hybrid
@@ -614,6 +701,17 @@ class Searcher:
 
         all_results.sort(key=lambda r: r["score"], reverse=True)
         final = all_results[:top_k]
+
+        if floor_active and not all_results:
+            return {
+                "results": [],
+                "total": 0,
+                "query": query,
+                "hybrid": hybrid,
+                "section_filter": section_filter,
+                "max_distance_applied": True,
+                "filtered_by_distance": filtered_by_distance,
+            }
 
         return {
             "results": final,
@@ -756,10 +854,21 @@ class Searcher:
 
     @property
     def status(self) -> dict:
-        """Status of all corpora."""
+        """Status of all corpora.
+
+        Includes the effective relevance floor per corpus so an empty search can
+        be attributed to filtering rather than to a broken index.
+        """
         return {
-            "corpora": [self.corpora[name].stats for name in self.corpora],
+            "corpora": [
+                {
+                    **self.corpora[name].stats,
+                    "max_distance": self._resolve_max_distance(name, None),
+                }
+                for name in self.corpora
+            ],
             "embedding_model": self.embedder.model_name,
             "dimensions": self.embedder.dimensions,
             "hybrid_enabled": self.config.search.hybrid,
+            "max_distance": self.config.search.max_distance,
         }
