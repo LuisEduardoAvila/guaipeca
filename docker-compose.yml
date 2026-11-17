@@ -20,7 +20,9 @@ services:
     environment:
       - GUAIPECA_CONFIG=/data/config/guaipeca.yaml
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health')"]
+      # Sends the Bearer token when server.auth_token is configured; without it
+      # this reports a working server as unhealthy. See docker-healthcheck.py.
+      test: ["CMD", "python", "/usr/local/bin/healthcheck.py"]
       interval: 30s
       timeout: 10s
       start_period: 60s

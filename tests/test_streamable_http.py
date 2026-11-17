@@ -9,8 +9,23 @@ R3 RULING: /mcp requires protocolVersion >= 2025-03-26. 2024-11-05 is rejected
 on /mcp but still honoured on legacy /sse.
 """
 
+
+
 from __future__ import annotations
 
+# SUPERSEDED by Phase 4 of the MCP SDK migration (design/mcp-sdk-migration-plan.md).
+# These tests drive GuaipecaMCPServer.run_http(), the hand-rolled ThreadingHTTPServer
+# transport, which no longer serves - HTTP is now mcp_sdk/http.py on uvicorn.
+# The behaviour they assert has equivalents in tests/test_mcp_sdk_http.py, EXCEPT
+# the cases listed in the Phase 5 assertion-mapping table (dead-session 404,
+# /mcp trailing slash, batch arrays, malformed request line, 413). Skipped rather
+# than deleted so nothing is lost before that mapping is reviewed.
+# Phase 5 ports the surviving assertions and then removes this file.
+import pytest as _pytest
+
+pytestmark = _pytest.mark.skip(
+    reason="hand-rolled HTTP transport removed in Phase 4; see tests/test_mcp_sdk_http.py"
+)
 import json
 import socket
 import threading
@@ -283,7 +298,8 @@ def _stop_mock_server(server_info):
 # ---- HTTP helpers ----
 
 def _post_mcp(url: str, body: dict | list, session_id: str | None = None,
-              auth_token: str | None = None) -> tuple[int, dict | list | bytes, dict]:
+              auth_token: str | None = None,
+              protocol_version: str | None = None) -> tuple[int, dict | list | bytes, dict]:
     """POST to /mcp and return (status_code, parsed_body_or_raw, headers)."""
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
@@ -292,6 +308,8 @@ def _post_mcp(url: str, body: dict | list, session_id: str | None = None,
         req.add_header("Mcp-Session-Id", session_id)
     if auth_token:
         req.add_header("Authorization", f"Bearer {auth_token}")
+    if protocol_version:
+        req.add_header("MCP-Protocol-Version", protocol_version)
 
     try:
         resp = urllib.request.urlopen(req, timeout=10)
@@ -375,7 +393,7 @@ def _options_mcp(url: str) -> tuple[int, dict]:
     return status, headers
 
 
-def _initialize(url: str, protocol_version: str = "2025-06-18",
+def _initialize(url: str, protocol_version: str = "2025-11-25",
                 auth_token: str | None = None) -> tuple[str, dict]:
     """Do an initialize handshake on /mcp. Returns (session_id, response_body)."""
     body = {
@@ -461,7 +479,25 @@ class TestInitialize:
         assert status == 200
         assert "mcp-session-id" in headers
         # Server should respond with its own default version
-        assert resp["result"]["protocolVersion"] == "2025-06-18"
+        assert resp["result"]["protocolVersion"] == "2025-11-25"
+
+    def test_initialize_negotiates_latest_known_version(self, http_server):
+        """Initialize with the newest known version → echoed back verbatim."""
+        body = {
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1.0"},
+            },
+        }
+        status, resp, headers = _post_mcp(http_server["mcp_url"], body)
+
+        assert status == 200, f"Expected 200, got {status}: {resp}"
+        assert resp["result"]["protocolVersion"] == "2025-11-25"
+        assert "mcp-session-id" in headers
 
     def test_initialize_rejects_old_protocol_version_on_mcp(self, http_server):
         """R3: Initialize with 2024-11-05 on /mcp → JSON-RPC error -32602."""
@@ -835,6 +871,55 @@ class TestAuth:
 
         assert status == 401
         assert resp["error"] == "unauthorized"
+
+
+# ===========================================================================
+# Streamable HTTP: MCP-Protocol-Version header handling
+# ===========================================================================
+
+class TestProtocolVersionHeader:
+    """Per the Streamable HTTP transport spec: an absent MCP-Protocol-Version
+    header is treated as the 2025-03-26 baseline and MUST be accepted; a
+    present-but-unknown value is a 400 client error."""
+
+    def test_missing_protocol_version_header_succeeds(self, http_server):
+        """No MCP-Protocol-Version header on a post-init request → 200."""
+        session_id, _ = _initialize(http_server["mcp_url"])
+        body = {"jsonrpc": "2.0", "id": 30, "method": "ping"}
+
+        status, resp, headers = _post_mcp(http_server["mcp_url"], body, session_id=session_id)
+
+        assert status == 200, f"Absent header must be accepted, got {status}: {resp}"
+        assert resp["result"] == {}
+
+    def test_invalid_protocol_version_header_gets_400(self, http_server):
+        """Unknown MCP-Protocol-Version header → 400 with -32000 error."""
+        session_id, _ = _initialize(http_server["mcp_url"])
+        body = {"jsonrpc": "2.0", "id": 31, "method": "ping"}
+
+        status, resp, headers = _post_mcp(
+            http_server["mcp_url"], body, session_id=session_id,
+            protocol_version="2099-01-01",
+        )
+
+        assert status == 400
+        assert resp["jsonrpc"] == "2.0"
+        assert resp["id"] == 31
+        assert resp["error"]["code"] == -32000
+        assert "2099-01-01" in resp["error"]["message"]
+
+    def test_valid_protocol_version_header_ok(self, http_server):
+        """Known MCP-Protocol-Version header → request proceeds (200)."""
+        session_id, _ = _initialize(http_server["mcp_url"])
+        body = {"jsonrpc": "2.0", "id": 32, "method": "ping"}
+
+        status, resp, headers = _post_mcp(
+            http_server["mcp_url"], body, session_id=session_id,
+            protocol_version="2025-11-25",
+        )
+
+        assert status == 200
+        assert resp["result"] == {}
 
 
 # ===========================================================================

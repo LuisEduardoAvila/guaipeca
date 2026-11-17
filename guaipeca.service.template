@@ -1,0 +1,48 @@
+# Guaipeca systemd unit TEMPLATE.
+#
+# `guaipeca.service` itself is gitignored because it embeds absolute personal
+# paths. Install from this template instead:
+#
+#   sed -e 's|CHANGEME|<your-user>|g' guaipeca.service.template \
+#     > /tmp/guaipeca.service
+#   sudo cp /tmp/guaipeca.service /etc/systemd/system/guaipeca.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now guaipeca
+#
+# tests/test_service_unit.py validates THIS file, so the shipped unit cannot
+# regress into "Unknown key ... ignoring" without a test failing.
+#
+[Unit]
+Description=Guaipeca RAG MCP Server
+Documentation=https://github.com/smartspud/guaipeca
+After=network.target
+# Start rate limiting belongs to [Unit]; systemd ignores both keys in
+# [Service]. Three restarts inside 60s trip the limit and leave the unit
+# failed rather than looping forever on a bad config.
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=CHANGEME
+Group=CHANGEME
+WorkingDirectory=%h/projects/guaipeca
+# HTTP only, deliberately. The old 'both' value also started a stdio listener,
+# which under systemd has no stdin and exits immediately — a thread born to
+# die. HTTP is the only transport a daemon can actually serve here.
+ExecStart=%h/.local/bin/guaipeca --config %h/.guaipeca/guaipeca.yaml serve --transport http --port 8090
+Restart=on-failure
+RestartSec=10
+
+# Resource limits — keep Guaipeca from starving other Pi services
+MemoryMax=1G
+CPUQuota=200%
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=%h
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=guaipeca
+
+[Install]
+WantedBy=multi-user.target

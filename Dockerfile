@@ -48,9 +48,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /build /app/guaipeca
 
-# Copy entrypoint script
+# Copy entrypoint and health probe
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY docker-healthcheck.py /usr/local/bin/healthcheck.py
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/healthcheck.py
 
 ENV PATH="/opt/venv/bin:$PATH"
 ENV PYTHONPATH="/app/guaipeca/src"
@@ -67,9 +68,13 @@ WORKDIR /app/guaipeca
 # Expose MCP HTTP/SSE port
 EXPOSE 8090
 
-# Health check — /health endpoint already exists
+# Health check — /health requires auth when auth_token is set, so the probe
+# must send it. Without this, enabling auth in the config turns every container
+# unhealthy while the app itself is serving fine. The token is read from the
+# config at probe time rather than baked in as an env var, so the two cannot
+# drift apart.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8090/health')" || exit 1
+    CMD python /usr/local/bin/healthcheck.py || exit 1
 
 # Entrypoint: create dirs with correct perms, then run as non-root user
 ENTRYPOINT ["docker-entrypoint.sh", "guaipeca", "--config", "/data/config/guaipeca.yaml", "serve", "--transport", "http", "--port", "8090"]

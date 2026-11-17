@@ -161,6 +161,9 @@ class UploadConfig:
 @dataclass
 class ServerConfig:
     """MCP server configuration."""
+    # "both" does NOT run two listeners: it means stdio when launched as a
+    # subprocess, HTTP when launched as a daemon (the SDK runs one server per
+    # transport). "sse" was removed in the MCP SDK migration — use "http".
     transport: str = "both"  # stdio | http | both
     port: int = 8090
     host: str = "127.0.0.1"  # P1-5: default to localhost for security
@@ -171,6 +174,12 @@ class ServerConfig:
     # upload.max_file_size by ~33% or large uploads will 413 before the upload
     # tool's own size check runs. Default 70MB leaves headroom for a 50MB file.
     max_body_size: int = 73400320  # 70MB
+    # Allowed browser Origin values for CORS / DNS-rebinding protection.
+    # None (default) => allow only loopback origins (http/https on
+    # localhost, 127.x, [::1], any port). A non-empty list => exact-match
+    # allowlist. Requests with NO Origin header (curl, CLI, non-browser
+    # MCP clients) are always allowed.
+    allowed_origins: list[str] | None = None
 
 
 @dataclass
@@ -243,6 +252,7 @@ class GuaipecaConfig:
             host=srv.get("host", "127.0.0.1"),
             auth_token=srv.get("auth_token"),
             max_body_size=srv.get("max_body_size", 73400320),
+            allowed_origins=srv.get("allowed_origins"),
         )
         # Allow env var override for auth token (security best practice)
         env_token = os.environ.get("GUAIPECA_AUTH_TOKEN")
@@ -325,6 +335,25 @@ class GuaipecaConfig:
             raise ValueError(f"server.auth_token must be a string or null, got: {type(self.server.auth_token).__name__}")
         if not isinstance(self.server.max_body_size, int) or self.server.max_body_size < 1:
             raise ValueError(f"server.max_body_size must be a positive integer, got: {self.server.max_body_size!r}")
+        if self.server.transport == "sse":
+            raise ValueError(
+                "server.transport is 'sse', but the legacy SSE transport was removed in the "
+                "MCP SDK migration. Use 'http' instead: it serves POST /mcp for both protocol "
+                "eras. Valid values: 'stdio', 'http', 'both'."
+            )
+        if self.server.transport not in ("stdio", "http", "both"):
+            raise ValueError(
+                f"server.transport must be one of 'stdio', 'http', 'both', got: "
+                f"{self.server.transport!r}"
+            )
+        if self.server.allowed_origins is not None and (
+            not isinstance(self.server.allowed_origins, list)
+            or not all(isinstance(o, str) for o in self.server.allowed_origins)
+        ):
+            raise ValueError(
+                f"server.allowed_origins must be a list of strings or null, got: "
+                f"{self.server.allowed_origins!r}"
+            )
 
         # Search config
         if not isinstance(self.search.hybrid, bool):

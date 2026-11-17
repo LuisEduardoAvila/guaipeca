@@ -23,7 +23,7 @@ Proven on a Raspberry Pi 5 (8GB RAM, ARM64) alongside other services. If it runs
 
 - **Multi-corpus** — define multiple document folders, each with its own weight and topic label
 - **MCP-native** — exposes `search`, `get_chunk`, `get_document`, `list_documents`, `index`, `status`, `list_folders`, `upload`, `delete`, and `get_toc` tools via MCP
-- **Multi-transport** — stdio (for local LLM integration) + HTTP: Streamable HTTP (`POST /mcp`) and legacy SSE (`GET /sse` + `POST /messages`) for remote/network access
+- **Multi-transport** — stdio (for local LLM integration) + Streamable HTTP (`POST /mcp`) for remote/network access. One endpoint serves both the handshake (2025-11-25 and earlier) and stateless (2026-07-28) protocol eras.
 - **Hybrid search** — optional BM25 sparse keyword search fused with FAISS dense vectors via Reciprocal Rank Fusion (RRF)
 - **Any document format** — pymupdf (PDFs with font-based heading detection + line-wrap stitching) + markitdown (DOCX, PPTX, XLSX, HTML → markdown)
 - **Structure-aware chunking** — splits on headings, treats tables as atomic units, zero LLM calls
@@ -94,7 +94,7 @@ chunking:
   split_on_headings: true
 
 server:
-  transport: both  # stdio | http | both
+  transport: both  # stdio | http | both (see Transports below)
   port: 8090
   host: 127.0.0.1  # Use 0.0.0.0 for network access
   # auth_token: "your-secret-token"  # Optional: require Bearer token auth
@@ -113,6 +113,31 @@ search:
   rrf_k: 60                  # RRF constant (higher = smoother ranking)
   max_chars: 8000            # Threshold for auto return_mode (total result chars)
 ```
+
+### Transports
+
+`server.transport` accepts three values:
+
+| Value | Behaviour |
+|-------|-----------|
+| `stdio` | MCP over stdin/stdout. For local clients that launch Guaipeca as a subprocess. |
+| `http` | MCP over Streamable HTTP (`POST /mcp`) plus the non-MCP endpoints (`/health`, `/tools`, `/download/...`, `DELETE /documents`). For a daemon serving the network. |
+| `both` (default) | stdio when launched as a subprocess, HTTP when launched as a daemon. This is **not** two simultaneous listeners — the MCP SDK runs one server per transport, so `both` picks one based on how the process was started. |
+
+`sse` is not a valid value. The legacy SSE transport is served by `transport: http`
+alongside Streamable HTTP — it is not selectable on its own, because there is
+nothing to select: the SSE routes are always mounted on the same port.
+`transport: http` serves `POST /mcp` for both protocol eras (the older
+session-based handshake and the newer stateless requests) **and** `GET /sse` +
+`POST /messages`. A config still set to `transport: sse` fails validation with
+an error pointing at `http`.
+
+`POST /mcp` is the preferred transport. The server says so in three places, so
+a client finds it whichever path it takes: the MCP `initialize` `instructions`,
+the `/tools` response (`transports.preferred`), and a `Deprecation: true` +
+`Link: </mcp>` header on the `GET /sse` stream. SSE is kept for clients that
+cannot use Streamable HTTP; it is deprecated upstream and will be removed in a
+future release.
 
 ## Embedding Models
 
@@ -386,7 +411,7 @@ guaipeca.yaml (config)
 Indexer     Searcher     MCP Server
   │            │            │
   │            │            ├── stdio transport
-  │            │            └── HTTP: Streamable (/mcp) + SSE (/sse, /messages) (port 8090)
+  │            │            └── HTTP: Streamable (/mcp, port 8090)
   │            │
   │            └── FAISS per-corpus + weighted merge
   │            
@@ -522,12 +547,28 @@ See `docs/container-deployment.md` for detailed VM deployment instructions.
 - **Authentication:** Set `auth_token` in the server config to require
   `Authorization: Bearer <token>` headers on HTTP requests. When auth is enabled,
   CORS is restricted (no wildcard origin).
+- **Origin validation (DNS-rebinding protection):** browser requests carry an
+  `Origin` header, and incoming requests with an unrecognised origin are
+  rejected with `403 Forbidden` before the auth check. By default only loopback
+  origins are accepted (`http://localhost:<port>`, `http://127.0.0.1:<port>`,
+  `http://[::1]:<port>`, any port). Requests with **no** `Origin` header (curl,
+  CLI tools, non-browser MCP clients) are always allowed. If you serve a browser
+  UI from any other host — including over a LAN address — you must add it
+  explicitly, or its requests will be rejected:
+  ```yaml
+  server:
+    allowed_origins:
+      - https://guaipeca.example.com   # exact match, scheme included
+      - http://192.168.1.20:3000
+  ```
+  Setting `allowed_origins` replaces the loopback default (it does not add to
+  it), so list every origin you need. Allowed origins are echoed back in
+  `Access-Control-Allow-Origin`.
 - **HTTP endpoints:**
-  - `POST /mcp` — Streamable HTTP transport (MCP protocol version `2025-06-18`); JSON-RPC request in, JSON-RPC response inline. `initialize` issues an `Mcp-Session-Id` header used on subsequent requests. Modern clients should prefer this endpoint.
+  - `POST /mcp` — Streamable HTTP transport (MCP protocol version `2025-11-25`); JSON-RPC request in, JSON-RPC response inline. `initialize` issues an `Mcp-Session-Id` header used on subsequent requests. Modern clients should prefer this endpoint. A client may send `MCP-Protocol-Version` on subsequent requests; an absent header is treated as the `2025-03-26` baseline, an unknown value gets `400`.
   - `DELETE /mcp` — terminate a Streamable HTTP session (send the `Mcp-Session-Id` header)
   - `GET /mcp` — returns `405 Method Not Allowed` (Guaipeca has no server-initiated messages; use `POST /mcp`)
-  - `GET /sse` — SSE stream for MCP transport (legacy, still supported)
-  - `POST /messages` — JSON-RPC messages (legacy, still supported)
+  - `GET /sse`, `POST /messages` — legacy SSE transport, still served but **deprecated**. Use `POST /mcp` instead; the stream carries `Deprecation: true` and a `Link` header pointing at `/mcp`.
   - `GET /health` — health check
   - `GET /tools` — list available tools
   - `GET /download/{corpus}/{filename}` — download original file (requires auth, path traversal protected)

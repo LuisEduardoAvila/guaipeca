@@ -22,13 +22,12 @@ Transports:
 from __future__ import annotations
 
 import difflib
-import hmac
+import ipaddress
 import json
 import logging
 import os
-import sys
 import threading
-import uuid
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -67,11 +66,40 @@ def _is_non_loopback_host(host: str) -> bool:
     # they expose the service. Only genuine loopback is considered safe.
     return not ip.is_loopback
 
-# MCP protocol version
-MCP_VERSION = "2025-06-18"
+
+def _origin_allowed(origin: str, allowed_origins: list[str] | None) -> bool:
+    """Decide whether an incoming Origin header is acceptable.
+
+    - No Origin header: always allowed (curl, CLI, non-browser clients).
+    - Explicit allowlist: exact match, trailing "/" ignored.
+    - Otherwise: allow only http/https on loopback hosts, any port.
+      DNS rebinding always targets a public hostname, so this closes it.
+    """
+    if not origin:
+        return True
+    if allowed_origins:
+        norm = origin.rstrip("/")
+        return norm in {a.rstrip("/") for a in allowed_origins}
+    try:
+        parsed = urllib.parse.urlparse(origin)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host in ("localhost", "ip6-localhost", "ip6-loopback")
+
+
+# MCP protocol version (latest revision this server implements)
+MCP_VERSION = "2025-11-25"
 
 # Known protocol versions for negotiation
-KNOWN_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
+KNOWN_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
 
 # Minimum protocol version required for Streamable HTTP transport (/mcp)
 MIN_STREAMABLE_VERSION = "2025-03-26"
@@ -456,6 +484,12 @@ class GuaipecaMCPServer:
             if client_version in KNOWN_PROTOCOL_VERSIONS:
                 negotiated = client_version
             else:
+                logger.info(
+                    "Unknown MCP protocol version %r requested; "
+                    "falling back to %s",
+                    client_version,
+                    MCP_VERSION,
+                )
                 negotiated = MCP_VERSION
             return {
                 "protocolVersion": negotiated,
@@ -763,679 +797,63 @@ class GuaipecaMCPServer:
                 "id": req_id,
                 "error": {"code": -32603, "message": _sanitize_error_message(e)},
             }
+    def run_sdk_stdio(self):
+        """Run the stdio transport through the official SDK (async stdio session).
 
-    # ---- stdio transport ----
+        Replaces the hand-rolled stdin line loop that served this transport
+        before the MCP SDK migration.
 
-    def run_stdio(self):
-        """Run MCP server over stdio transport."""
-        logger.info("Starting Guaipeca MCP server (stdio)")
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-
-            response = self._process_jsonrpc(line.encode("utf-8"))
-            if response is None:
-                continue
-
-            sys.stdout.write(json.dumps(response) + "\n")
-            sys.stdout.flush()
-
-    # ---- HTTP transport (MCP-compliant SSE) ----
-
-    def run_http(self, host: str = "127.0.0.1", port: int = 8090):
+        The SDK's ``Server`` is fully async, so it needs an event loop. When
+        called from a thread without a running loop (the ``both`` transport),
+        ``asyncio.run`` creates that loop in the calling thread. Do not call
+        this from inside a running loop: ``asyncio.run`` would raise, and a
+        second loop on the same thread is not what the SDK expects.
         """
-        Run MCP server over HTTP transport using Server-Sent Events.
+        import asyncio
 
-        MCP HTTP transport:
-        - GET /sse — opens an SSE stream, server sends an `endpoint` event with a POST URL
-        - POST /messages?session_id=<id> — client sends JSON-RPC messages via POST
-        - Server pushes responses back through the SSE stream
-        - GET /health — health check endpoint
-        - GET /tools — list available tools (convenience endpoint)
+        from .mcp_sdk.tools import run_stdio as _run_sdk_stdio
 
-        If auth_token is configured, validates Authorization: Bearer <token> header.
+        logger.info("Starting Guaipeca MCP server (stdio, mcp SDK)")
+        asyncio.run(_run_sdk_stdio(self.config, self))
+
+    def run_http_sdk(self, host: str = "127.0.0.1", port: int = 8090):
+        """Run the HTTP transport through the official SDK.
+
+        ``mcp_sdk.http.serve`` owns port-retry, uvicorn and shutdown; the
+        non-MCP endpoints (/health, /tools, downloads, DELETE /documents) are
+        Starlette routes on the same app.
         """
-        import http.server
-        import urllib.parse
-        from queue import Empty, Queue
+        from .mcp_sdk.http import serve as _serve_http
 
-        server_instance = self
-        auth_token = self.config.server.auth_token
-        # Restrict CORS to non-wildcard when auth is enabled
-        cors_origin = "*" if not auth_token else "null"
-        # Configurable request-body cap (see ServerConfig.max_body_size).
-        # Read defensively: tests and embedding callers may pass a duck-typed
-        # config whose .server only exposes auth_token.
-        max_body_size = getattr(self.config.server, "max_body_size", 73400320)
-
-        # Security nice-to-have: warn when exposed on a non-loopback interface
-        # without auth. Optional auth is intentional by design, so this is a
-        # warning only — it does not alter request handling.
-        if not auth_token and _is_non_loopback_host(host):
-            logger.warning(
-                "=" * 60 + "\n"
-                f"⚠️  UNAUTHENTICATED PUBLIC BIND: host={host!r}\n"
-                "   No auth_token is configured, so ALL endpoints are\n"
-                "   reachable WITHOUT authentication from any client that\n"
-                "   can reach this address.\n"
-                "   To require auth: set server.auth_token in the config.\n"
-                "   To restrict to this machine: bind host=127.0.0.1.\n"
-                + "=" * 60
-            )
-
-        # Security nice-to-have: warn when exposed on a non-loopback interface
-        # without auth. Optional auth is intentional by design, so this is a
-        # warning only — it does not alter request handling.
-        if not auth_token and _is_non_loopback_host(host):
-            logger.warning(
-                "=" * 60 + "\n"
-                f"⚠️  UNAUTHENTICATED PUBLIC BIND: host={host!r}\n"
-                "   No auth_token is configured, so ALL endpoints are\n"
-                "   reachable WITHOUT authentication from any client that\n"
-                "   can reach this address.\n"
-                "   To require auth: set server.auth_token in the config.\n"
-                "   To restrict to this machine: bind host=127.0.0.1.\n"
-                + "=" * 60
-            )
-
-        # Session management: each SSE connection gets a session with a message queue
-        sessions: dict[str, MCPSession] = {}
-        sessions_lock = threading.Lock()
-
-        class MCPSession:
-            """Represents a single MCP session (SSE or Streamable HTTP)."""
-            def __init__(self, client_address: str, transport: str = "sse"):
-                self.session_id = str(uuid.uuid4())
-                self.client_address = client_address
-                self.transport = transport  # "sse" or "streamable"
-                self.response_queue: Queue = Queue()  # used by SSE transport
-                self.active = True
-                # The POST endpoint URL for this session (SSE only)
-                self.post_endpoint = f"/messages?session_id={self.session_id}"
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.1"
-
-            def _check_auth(self) -> bool:
-                """Check if the request has valid auth. Returns True if authorized."""
-                if not auth_token:
-                    return True
-                auth_header = self.headers.get("Authorization", "")
-                if auth_header.startswith("Bearer "):
-                    token = auth_header[7:]
-                    return hmac.compare_digest(token, auth_token)
-                return False
-
-            def _send_json(self, code: int, data: dict):
-                body = json.dumps(data).encode("utf-8")
-                self.send_response(code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def _send_sse_event(self, event: str, data: str):
-                """Send a single SSE event to the client."""
-                self.wfile.write(f"event: {event}\n".encode())
-                self.wfile.write(f"data: {data}\n\n".encode())
-                self.wfile.flush()
-
-            def do_GET(self):
-                parsed = urllib.parse.urlparse(self.path)
-
-                # SSE endpoint — opens a persistent event stream
-                if parsed.path == "/sse":
-                    if not self._check_auth():
-                        self._send_json(401, {"error": "unauthorized"})
-                        return
-
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/event-stream")
-                    self.send_header("Cache-Control", "no-cache")
-                    self.send_header("Connection", "keep-alive")
-                    self.send_header("Access-Control-Allow-Origin", cors_origin)
-                    self.end_headers()
-
-                    # Create a new session
-                    session = MCPSession(self.client_address[0], transport="sse")
-                    with sessions_lock:
-                        sessions[session.session_id] = session
-                    logger.info(f"SSE session started: {session.session_id} from {self.client_address[0]}")
-
-                    # Send the endpoint event so the client knows where to POST messages
-                    self._send_sse_event("endpoint", session.post_endpoint)
-
-                    # Keep the SSE stream open and push responses as they arrive
-                    try:
-                        while session.active:
-                            try:
-                                response_data = session.response_queue.get(timeout=15)
-                                # Check if it's a close signal
-                                if response_data is None:
-                                    break
-                                self._send_sse_event("message", response_data)
-                            except Empty:
-                                # Send a comment as keepalive ping
-                                self.wfile.write(b": ping\n\n")
-                                self.wfile.flush()
-                    except (ConnectionError, BrokenPipeError):
-                        logger.info(f"SSE connection closed for session {session.session_id}")
-                    finally:
-                        session.active = False
-                        with sessions_lock:
-                            sessions.pop(session.session_id, None)
-                        logger.info(f"SSE session ended: {session.session_id}")
-                    return
-
-                # Health check
-                if parsed.path == "/health":
-                    self._send_json(200, {"status": "ok", "server": "guaipeca", "version": __version__})
-                    return
-
-                # Tools listing (convenience endpoint)
-                if parsed.path == "/tools":
-                    if not self._check_auth():
-                        self._send_json(401, {"error": "unauthorized"})
-                        return
-                    self._send_json(200, {"tools": TOOLS})
-                    return
-
-                # File download endpoint: /download/{corpus}/{filename}
-                if parsed.path.startswith("/download/"):
-                    if not self._check_auth():
-                        self._send_json(401, {"error": "unauthorized"})
-                        return
-
-                    # Parse corpus and filename from path
-                    # URL path: /download/{corpus}/{filename}
-                    parts = parsed.path.split("/", 3)  # ['', 'download', 'corpus', 'filename']
-                    if len(parts) < 4:
-                        self._send_json(400, {"error": "path must be /download/{corpus}/{filename}"})
-                        return
-
-                    corpus_name = parts[2]
-                    filename = urllib.parse.unquote(parts[3])
-
-                    # Path traversal protection: reject .. and absolute paths
-                    if ".." in filename or filename.startswith("/"):
-                        self._send_json(400, {"error": "invalid filename"})
-                        return
-                    if ".." in corpus_name or corpus_name.startswith("/"):
-                        self._send_json(400, {"error": "invalid corpus"})
-                        return
-
-                    # Look up corpus in config
-                    corpus_cfg = server_instance.config.get_corpus(corpus_name)
-                    if corpus_cfg is None:
-                        self._send_json(404, {"error": f"corpus not found: {corpus_name}"})
-                        return
-
-                    # Resolve file path within corpus directory
-                    corpus_path = Path(corpus_cfg.path)
-                    file_path = corpus_path / filename
-
-                    # Final safety check: ensure resolved path is within corpus
-                    try:
-                        file_path.resolve().relative_to(corpus_path.resolve())
-                    except ValueError:
-                        self._send_json(400, {"error": "path outside corpus directory"})
-                        return
-
-                    if not file_path.exists() or not file_path.is_file():
-                        self._send_json(404, {"error": f"file not found: {filename}"})
-                        return
-
-                    # Serve the file with proper headers
-                    import mimetypes
-                    content_type, _ = mimetypes.guess_type(str(file_path))
-                    if content_type is None:
-                        content_type = "application/octet-stream"
-
-                    file_size = file_path.stat().st_size
-                    self.send_response(200)
-                    self.send_header("Content-Type", content_type)
-                    self.send_header("Content-Length", str(file_size))
-                    self.send_header(
-                        "Content-Disposition",
-                        f'attachment; filename="{filename}"'
-                    )
-                    self.end_headers()
-                    with open(file_path, "rb") as f:
-                        self.wfile.write(f.read())
-                    return
-
-                # GET /mcp → 405 Method Not Allowed (Streamable HTTP transport
-                # does not support server-initiated SSE streaming)
-                if parsed.path == "/mcp":
-                    self._send_json(405, {
-                        "error": "GET /mcp not supported; use POST /mcp for JSON-RPC requests"
-                    })
-                    return
-
-                # Unknown path
-                self._send_json(404, {"error": "not found"})
-
-            def do_POST(self):
-                parsed = urllib.parse.urlparse(self.path)
-                query_params = urllib.parse.parse_qs(parsed.query)
-
-                # Streamable HTTP transport — POST /mcp
-                if parsed.path == "/mcp":
-                    if not self._check_auth():
-                        self._send_json(401, {"error": "unauthorized"})
-                        return
-
-                    content_length = int(self.headers.get("Content-Length", 0))
-                    # Enforce configurable max body size to prevent memory exhaustion
-                    if content_length > max_body_size:
-                        self._send_json(413, {"error": "request body too large"})
-                        return
-                    body = self.rfile.read(content_length) if content_length > 0 else b"{}"
-
-                    # Parse JSON to determine request type
-                    try:
-                        parsed_body = json.loads(body)
-                    except (json.JSONDecodeError, ValueError):
-                        # Malformed JSON → parse error
-                        self.send_response(200)
-                        self.send_header("Content-Type", "application/json")
-                        self.send_header("Access-Control-Allow-Origin", cors_origin)
-                        resp_body = json.dumps({
-                            "jsonrpc": "2.0",
-                            "id": None,
-                            "error": {"code": -32700, "message": "Parse error"},
-                        }).encode("utf-8")
-                        self.send_header("Content-Length", str(len(resp_body)))
-                        self.end_headers()
-                        self.wfile.write(resp_body)
-                        return
-
-                    # Batch request (JSON array)
-                    if isinstance(parsed_body, list):
-                        # Empty batch → 200 with empty array (per JSON-RPC 2.0)
-                        if len(parsed_body) == 0:
-                            resp_body = b"[]"
-                            self.send_response(200)
-                            self.send_header("Content-Type", "application/json")
-                            self.send_header("Content-Length", str(len(resp_body)))
-                            self.send_header("Access-Control-Allow-Origin", cors_origin)
-                            self.end_headers()
-                            self.wfile.write(resp_body)
-                            return
-
-                        responses = []
-                        for entry in parsed_body:
-                            entry_bytes = json.dumps(entry).encode("utf-8")
-                            resp = server_instance._process_jsonrpc(entry_bytes)
-                            if resp is not None:
-                                responses.append(resp)
-
-                        if not responses:
-                            # All entries were notifications → 202 empty body
-                            self.send_response(202)
-                            self.send_header("Content-Length", "0")
-                            self.send_header("Access-Control-Allow-Origin", cors_origin)
-                            self.end_headers()
-                            return
-
-                        resp_body = json.dumps(responses).encode("utf-8")
-                        self.send_response(200)
-                        self.send_header("Content-Type", "application/json")
-                        self.send_header("Content-Length", str(len(resp_body)))
-                        self.send_header("Access-Control-Allow-Origin", cors_origin)
-                        self.end_headers()
-                        self.wfile.write(resp_body)
-                        return
-
-                    # Single request
-                    if not isinstance(parsed_body, dict):
-                        # Not a valid JSON-RPC object → invalid request error
-                        self.send_response(200)
-                        self.send_header("Content-Type", "application/json")
-                        self.send_header("Access-Control-Allow-Origin", cors_origin)
-                        resp_body = json.dumps({
-                            "jsonrpc": "2.0",
-                            "id": None,
-                            "error": {"code": -32600, "message": "Invalid Request"},
-                        }).encode("utf-8")
-                        self.send_header("Content-Length", str(len(resp_body)))
-                        self.end_headers()
-                        self.wfile.write(resp_body)
-                        return
-
-                    method = parsed_body.get("method", "")
-                    req_id = parsed_body.get("id")
-                    params = parsed_body.get("params", {})
-                    session_id_header = self.headers.get("Mcp-Session-Id", "").strip()
-
-                    # Handle initialize
-                    if method == "initialize":
-                        # If session header references existing session → reject
-                        if session_id_header:
-                            with sessions_lock:
-                                if session_id_header in sessions:
-                                    self._send_json(400, {"error": "session already initialized"})
-                                    return
-
-                        # R3: Reject protocolVersion < 2025-03-26 on /mcp.
-                        # Only *known* versions below the minimum are rejected here;
-                        # unknown versions fall through and get the server default.
-                        client_version = params.get("protocolVersion", "")
-                        if client_version in KNOWN_PROTOCOL_VERSIONS and client_version < MIN_STREAMABLE_VERSION:
-                            # Known but too old for /mcp
-                            err_resp = {
-                                "jsonrpc": "2.0",
-                                "id": req_id,
-                                "error": {
-                                    "code": -32602,
-                                    "message": (
-                                        f"Unsupported protocol version: {client_version}. "
-                                        f"Minimum supported version for Streamable HTTP transport is "
-                                        f"{MIN_STREAMABLE_VERSION}."
-                                    ),
-                                },
-                            }
-                            self.send_response(200)
-                            self.send_header("Content-Type", "application/json")
-                            self.send_header("Access-Control-Allow-Origin", cors_origin)
-                            resp_body = json.dumps(err_resp).encode("utf-8")
-                            self.send_header("Content-Length", str(len(resp_body)))
-                            self.end_headers()
-                            self.wfile.write(resp_body)
-                            return
-
-                        # Create new session
-                        session = MCPSession(self.client_address[0], transport="streamable")
-                        with sessions_lock:
-                            sessions[session.session_id] = session
-                        logger.info(f"Streamable HTTP session started: {session.session_id} from {self.client_address[0]}")
-
-                        # Process the initialize request
-                        result = server_instance.handle_request(method, params)
-
-                        # Notifications have no id → 202
-                        if result is None or req_id is None:
-                            self.send_response(202)
-                            self.send_header("Content-Length", "0")
-                            self.send_header("Access-Control-Allow-Origin", cors_origin)
-                            self.end_headers()
-                            return
-
-                        resp = {"jsonrpc": "2.0", "id": req_id, "result": result}
-                        resp_body = json.dumps(resp).encode("utf-8")
-                        self.send_response(200)
-                        self.send_header("Content-Type", "application/json")
-                        self.send_header("Content-Length", str(len(resp_body)))
-                        self.send_header("Mcp-Session-Id", session.session_id)
-                        self.send_header("Access-Control-Allow-Origin", cors_origin)
-                        self.end_headers()
-                        self.wfile.write(resp_body)
-                        return
-
-                    # Non-initialize request: require valid session
-                    if not session_id_header:
-                        self.send_response(400)
-                        self.send_header("Content-Type", "application/json")
-                        self.send_header("Access-Control-Allow-Origin", cors_origin)
-                        resp_body = json.dumps({
-                            "jsonrpc": "2.0",
-                            "id": req_id,
-                            "error": {"code": -32000, "message": "Missing or invalid Mcp-Session-Id header"},
-                        }).encode("utf-8")
-                        self.send_header("Content-Length", str(len(resp_body)))
-                        self.end_headers()
-                        self.wfile.write(resp_body)
-                        return
-
-                    with sessions_lock:
-                        if session_id_header not in sessions:
-                            # A present-but-unrecognized session id means the
-                            # session is gone (e.g. the server restarted). Per
-                            # the MCP Streamable HTTP spec the server MUST reply
-                            # 404 so clients can detect expiry and re-initialize.
-                            # Returning 400 here left clients (e.g. opencode)
-                            # retrying a dead session forever, since they key
-                            # their reconnect on the 404 status, not on a
-                            # -32000 JSON-RPC body.
-                            self.send_response(404)
-                            self.send_header("Content-Type", "application/json")
-                            self.send_header("Access-Control-Allow-Origin", cors_origin)
-                            resp_body = json.dumps({
-                                "jsonrpc": "2.0",
-                                "id": req_id,
-                                "error": {"code": -32000, "message": "Session not found"},
-                            }).encode("utf-8")
-                            self.send_header("Content-Length", str(len(resp_body)))
-                            self.end_headers()
-                            self.wfile.write(resp_body)
-                            return
-
-                    # Process the request
-                    result = server_instance.handle_request(method, params)
-
-                    # Notification → 202 empty body
-                    if result is None or req_id is None:
-                        self.send_response(202)
-                        self.send_header("Content-Length", "0")
-                        self.send_header("Access-Control-Allow-Origin", cors_origin)
-                        self.end_headers()
-                        return
-
-                    resp = {"jsonrpc": "2.0", "id": req_id, "result": result}
-                    resp_body = json.dumps(resp).encode("utf-8")
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(resp_body)))
-                    self.send_header("Access-Control-Allow-Origin", cors_origin)
-                    self.end_headers()
-                    self.wfile.write(resp_body)
-                    return
-
-                # Message endpoint — client sends JSON-RPC messages here
-                if parsed.path == "/messages":
-                    if not self._check_auth():
-                        self._send_json(401, {"error": "unauthorized"})
-                        return
-
-                    session_id = query_params.get("session_id", [None])[0]
-                    with sessions_lock:
-                        if not session_id or session_id not in sessions:
-                            self._send_json(400, {
-                                "jsonrpc": "2.0",
-                                "id": None,
-                                "error": {"code": -32000, "message": "invalid or missing session_id"},
-                            })
-                            return
-                        session = sessions[session_id]
-
-                    content_length = int(self.headers.get("Content-Length", 0))
-                    # Enforce configurable max body size to prevent memory exhaustion
-                    if content_length > max_body_size:
-                        self._send_json(413, {"error": "request body too large"})
-                        return
-                    body = self.rfile.read(content_length) if content_length > 0 else b"{}"
-
-                    # Accept the request immediately (202 Accepted)
-                    self.send_response(202)
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
-
-                    # Process the request and push the response through SSE
-                    response = server_instance._process_jsonrpc(body)
-                    if response is not None:
-                        session.response_queue.put(json.dumps(response))
-                    return
-
-                # Unknown POST path
-                self._send_json(404, {"error": "not found"})
-
-            def do_DELETE(self):
-                """Handle DELETE requests (session termination and file deletion)."""
-                parsed = urllib.parse.urlparse(self.path)
-                query_params = urllib.parse.parse_qs(parsed.query)
-
-                # DELETE /mcp — terminate a streamable HTTP (or legacy SSE) session
-                if parsed.path == "/mcp":
-                    if not self._check_auth():
-                        self._send_json(401, {"error": "unauthorized"})
-                        return
-
-                    session_id_header = self.headers.get("Mcp-Session-Id", "").strip()
-                    if not session_id_header:
-                        self._send_json(400, {"error": "Missing Mcp-Session-Id header"})
-                        return
-
-                    with sessions_lock:
-                        if session_id_header not in sessions:
-                            self._send_json(404, {"error": "session not found"})
-                            return
-                        session = sessions.pop(session_id_header)
-                        session.active = False
-
-                    logger.info(f"Session terminated via DELETE /mcp: {session_id_header}")
-                    self._send_json(200, {"status": "session terminated"})
-                    return
-
-                # DELETE /documents?corpus=<name>&filename=<name>
-                if parsed.path == "/documents":
-                    if not self._check_auth():
-                        self._send_json(401, {"error": "unauthorized"})
-                        return
-
-                    corpus_name = query_params.get("corpus", [None])[0]
-                    filename = query_params.get("filename", [None])[0]
-
-                    if not corpus_name or not filename:
-                        self._send_json(400, {"error": "corpus and filename required"})
-                        return
-
-                    result = server_instance._handle_delete(corpus_name, filename, do_index=True)
-                    if result.get("error"):
-                        self._send_json(400, result)
-                    else:
-                        self._send_json(200, result)
-                    return
-
-                self._send_json(404, {"error": "not found"})
-
-            def do_OPTIONS(self):
-                """Handle CORS preflight requests."""
-                self.send_response(204)
-                self.send_header("Access-Control-Allow-Origin", cors_origin)
-                self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id")
-                self.end_headers()
-
-            def send_error(self, code, message=None, explain=None):
-                """Override send_error to catch ConnectionError.
-
-                When a client sends a malformed request line and immediately
-                closes the connection (e.g. a port scanner or a healthcheck
-                that sends garbage), BaseHTTPRequestHandler.parse_request()
-                calls send_error() which tries to write an HTML error body.
-                If the socket is already closed, the write raises
-                BrokenPipeError / ConnectionResetError, producing a noisy
-                traceback in the logs even though the server survives.
-
-                This override delegates to the parent implementation and
-                silently swallows ConnectionError so the handler exits
-                cleanly without an unhandled-exception traceback.
-                """
-                try:
-                    super().send_error(code, message, explain)
-                except (ConnectionError, BrokenPipeError):
-                    # Client gone — nothing we can do. Close the connection
-                    # and move on without a traceback.
-                    self.close_connection = True
-
-            def log_message(self, format, *args):
-                logger.debug(f"HTTP {format % args}")
-
-        # Use ThreadingHTTPServer for concurrent request handling.
-        # (SSE connections are long-lived, so single-threaded would block.)
-        #
-        # daemon_threads + block_on_close are essential for graceful shutdown:
-        # ThreadingHTTPServer spawns one non-daemon thread per connection by
-        # default and server_close() joins them.  Long-lived SSE streams keep
-        # those threads parked, so even after serve_forever() stops the
-        # interpreter blocks at exit waiting on the workers.  Making them
-        # daemon threads and skipping the join lets the process exit promptly.
-        class _Server(http.server.ThreadingHTTPServer):
-            daemon_threads = True
-            block_on_close = False
-
-        actual_port = port
-        for attempt in range(5):
-            try:
-                httpd = _Server((host, actual_port), Handler)
-                break
-            except OSError:
-                actual_port += 1
-                logger.warning(f"Port {actual_port - 1} in use, trying {actual_port}")
-        else:
-            raise RuntimeError(f"Could not find available port starting at {port}")
-
-        logger.info(f"Starting Guaipeca MCP server (HTTP/SSE) on {host}:{actual_port}")
-        print(f"Guaipeca MCP server listening on http://{host}:{actual_port}", file=sys.stderr)
-
-        # Graceful shutdown: the signal handler must NOT call httpd.shutdown()
-        # directly — that call blocks waiting for serve_forever() to acknowledge
-        # the shutdown flag, and the handshake deadlocks when the handler runs
-        # in the same thread as serve_forever().  Instead the handler only sets
-        # a threading.Event; a background thread calls httpd.shutdown() after
-        # the event fires, unblocking serve_forever() cleanly.
-        import signal
-
-        _shutdown_event = threading.Event()
-
-        def _handle_term(signum, frame):
-            logger.info("Received %s, initiating shutdown", signal.Signals(signum).name)
-            _shutdown_event.set()
-        signal.signal(signal.SIGTERM, _handle_term)
-        signal.signal(signal.SIGINT, _handle_term)
-
-        # Run serve_forever() in a daemon thread so the main thread can wait
-        # on the shutdown event without blocking the signal handler.
-        _serve_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-        _serve_thread.start()
-
-        # Block until a signal sets the event.
-        _shutdown_event.wait()
-
-        logger.info("Shutdown flag set, stopping HTTP server")
-        httpd.shutdown()
-        _serve_thread.join(timeout=5)
-        try:
-            httpd.server_close()
-        except Exception:
-            pass
-        logger.info("HTTP server stopped, exiting process")
-
-        # Force-exit to bypass native non-daemon thread pools spawned by
-        # fastembed/numpy (rayon in tokenizers.abi3.so, BLAS in
-        # libscipy_openblas64).  Those threads park on condvar waits for
-        # the lifetime of the process and have no stop API.  If we return
-        # normally the interpreter blocks at finalization waiting for them,
-        # wedging the process in futex_do_wait — systemd's stop times out
-        # and the port stays bound until a SIGKILL.
-        for _stream in (sys.stdout, sys.stderr):
-            try:
-                _stream.flush()
-            except Exception:
-                pass
-        os._exit(0)
+        logger.info("Starting Guaipeca MCP server (HTTP, mcp SDK)")
+        _serve_http(self.config, self, host, port)
 
     def run(self, transport: str = "both", host: str = "127.0.0.1", port: int = 8090):
         """Run the server with the specified transport(s)."""
+        # Import the SDK stack once, here, on one thread.
+        #
+        # ``mcp`` has a genuine import cycle (mcp.server -> mcp -> mcp.client ->
+        # mcp.server._memory -> mcp.server). Importing two SDK entry points
+        # concurrently from different threads can observe a half-initialised
+        # ``mcp.server`` and raise "cannot import name 'Server' from partially
+        # initialized module". Under 'both' the stdio thread and the main
+        # thread would race exactly like that, failing roughly one start in
+        # three. Importing up front makes both transports reuse the cached
+        # modules instead of racing to populate them.
+        from .mcp_sdk import http as _sdk_http  # noqa: F401
+        from .mcp_sdk import tools as _sdk_tools  # noqa: F401
+
         if transport == "stdio":
-            self.run_stdio()
+            self.run_sdk_stdio()
         elif transport == "http":
-            self.run_http(host, port)
+            self.run_http_sdk(host, port)
         elif transport == "both":
-            # Run stdio in a daemon thread, HTTP in main
-            stdio_thread = threading.Thread(target=self.run_stdio, daemon=True)
+            # Run stdio in a daemon thread, HTTP in main. The stdio side is an
+            # asyncio loop owned entirely by that worker thread (see
+            # run_sdk_stdio), so it cannot interact with the HTTP thread's loop
+            # or signal handling.
+            stdio_thread = threading.Thread(target=self.run_sdk_stdio, daemon=True)
             stdio_thread.start()
-            self.run_http(host, port)
+            self.run_http_sdk(host, port)
         else:
             raise ValueError(f"Unknown transport: {transport}")
