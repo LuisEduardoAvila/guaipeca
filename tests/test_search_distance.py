@@ -23,7 +23,7 @@ from guaipeca.config import (
     IndexingConfig,
     SearchConfig,
 )
-from guaipeca.index import CorpusIndex, _assert_inner_product
+from guaipeca.index import CorpusIndex, _scores_are_cosine
 from guaipeca.search import Searcher
 
 DIMS = 8
@@ -300,11 +300,106 @@ def test_max_distance_parsed_from_yaml(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Guard: fail closed on a non inner-product index
+# Guard: proportional to what is at stake
 # ---------------------------------------------------------------------------
 
-def test_non_inner_product_index_is_rejected():
+def test_inner_product_index_is_recognised():
     import faiss
 
-    with pytest.raises(RuntimeError, match="metric is not inner product"):
-        _assert_inner_product(faiss.IndexFlatL2(DIMS))
+    assert _scores_are_cosine(faiss.IndexFlatIP(DIMS)) is True
+
+
+def test_l2_index_is_not_cosine():
+    import faiss
+
+    assert _scores_are_cosine(faiss.IndexFlatL2(DIMS)) is False
+
+
+def test_uninspectable_index_is_not_rejected():
+    """metric_type None means "cannot tell" - a test double, not a wrong metric.
+
+    Rejecting it made an unrelated concurrency test fail on a mock index, which
+    is the guard being stricter than the situation warrants.
+    """
+    assert _scores_are_cosine(object()) is True
+
+
+def test_floor_on_non_cosine_index_raises(tmp_path):
+    """A floor needs cosine similarity, so this case must refuse.
+
+    Only a search that actually sets max_distance is refused. Plain search on
+    the same index still works: ordering is correct either way, because FAISS
+    handles smaller-is-better itself. Refusing plain search would turn a niche
+    configuration into an outage.
+    """
+    searcher = _two_chunk_corpus(tmp_path)
+    corpus_idx = searcher.corpora["docs"]
+    import faiss
+
+    with corpus_idx._rwlock.write_lock():
+        corpus_idx._faiss_index = faiss.IndexFlatL2(DIMS)
+
+    with pytest.raises(RuntimeError, match="inner product"):
+        corpus_idx._check_dense_metric(require_floor=True)
+
+
+def test_plain_search_on_non_cosine_index_warns_but_works(tmp_path, caplog):
+    """No floor requested: warn once, keep serving.
+
+    `raw_score` still orders hits correctly on an L2 index, so only the floor is
+    unavailable. Warning beats failing a search that never asked for one.
+    """
+    searcher = _two_chunk_corpus(tmp_path)
+    corpus_idx = searcher.corpora["docs"]
+    import faiss
+
+    with corpus_idx._rwlock.write_lock():
+        corpus_idx._faiss_index = faiss.IndexFlatL2(DIMS)
+
+    corpus_idx._check_dense_metric()  # must not raise
+    assert corpus_idx._metric_warned is True
+
+
+def test_legacy_l2_index_still_serves_plain_search(tmp_path):
+    """The regression that would have bitten an existing deployment.
+
+    A corpus indexed by some other build with an L2 metric must remain
+    searchable. Refusing it outright would turn "max_distance unavailable" into
+    "corpus offline" — a much bigger failure than the feature not working.
+
+    Proven end to end through Searcher.search, not by calling the guard.
+    """
+    searcher = _two_chunk_corpus(tmp_path, SearchConfig(hybrid=False))
+    corpus_idx = searcher.corpora["docs"]
+    import faiss
+
+    with corpus_idx._rwlock.write_lock():
+        l2 = faiss.IndexFlatL2(DIMS)
+        l2.add(HIGH_EMBEDDING.reshape(1, -1).astype("float32"))
+        l2.add(LOW_EMBEDDING.reshape(1, -1).astype("float32"))
+        corpus_idx._faiss_index = l2
+
+    result = searcher.search("anything", top_k=5)
+    assert result.get("error") is None
+    assert result["total"] >= 1
+    # No floor keys, because no floor was requested.
+    assert "max_distance_applied" not in result
+
+
+def test_legacy_l2_index_refuses_only_a_floor(tmp_path):
+    """Same index, but asking for a floor must fail loudly.
+
+    This is the other half: being permissive about plain search must not become
+    permissive about the one operation whose correctness depends on the metric.
+    """
+    searcher = _two_chunk_corpus(tmp_path, SearchConfig(hybrid=False))
+    corpus_idx = searcher.corpora["docs"]
+    import faiss
+
+    with corpus_idx._rwlock.write_lock():
+        l2 = faiss.IndexFlatL2(DIMS)
+        l2.add(HIGH_EMBEDDING.reshape(1, -1).astype("float32"))
+        corpus_idx._faiss_index = l2
+
+    with pytest.raises(RuntimeError, match="inner product"):
+        searcher.search("anything", top_k=5, max_distance=0.5)

@@ -38,35 +38,32 @@ logger = logging.getLogger(__name__)
 STALE_REBUILD_THRESHOLD = 0.10
 
 
-def _assert_inner_product(index) -> None:
-    """Fail closed unless *index* ranks by inner product.
+def _scores_are_cosine(index) -> bool:
+    """Whether *index* ranks dense hits by cosine similarity.
 
     Search ranks dense hits by ``raw_score``, and issue #12 exposes that as the
     relevance floor ``max_distance``: keep only hits with ``raw_score >=
-    1 - max_distance``. That identity is only true for inner-product search
-    over L2-normalised vectors, where the score IS the cosine similarity.
+    1 - max_distance``. That identity holds only for inner-product search over
+    L2-normalised vectors, where the score IS the cosine similarity. A flat L2
+    index returns *smaller* scores for better matches, so the same comparison
+    would keep the worst chunks and drop the best.
 
-    A flat L2 index returns *smaller* scores for better matches, so applying
-    the same comparison to it would silently keep the worst chunks and drop
-    the best. Raising here beats mis-thresholding silently.
+    Deliberately a predicate rather than an assert. Raising unconditionally
+    would make any unexpected index unusable for *plain* searching, which needs
+    no cosine interpretation at all - turning a niche configuration into an
+    outage. Callers decide: search warns and continues, while a request that
+    actually sets ``max_distance`` refuses, because only there is the identity
+    load-bearing.
+
+    ``metric_type is None`` means "cannot tell" (a test double or a wrapper),
+    not "wrong metric": real index objects always report an int.
     """
     import faiss
 
     metric = getattr(index, "metric_type", None)
-    # ``None`` means "cannot tell" - a test double or a wrapper that does not
-    # expose metric_type - not "wrong metric". Real FlatL2/FlatIP objects always
-    # report an int, so a genuinely different metric still fails closed; this
-    # only stops the guard rejecting objects it cannot inspect.
     if metric is None:
-        return
-    if metric != faiss.METRIC_INNER_PRODUCT:
-        raise RuntimeError(
-            "FAISS index metric is not inner product "
-            f"(metric_type={metric!r}, expected faiss.METRIC_INNER_PRODUCT="
-            f"{faiss.METRIC_INNER_PRODUCT}). Scores would not be cosine "
-            "similarities, so max_distance (1 - cosine) cannot be applied. "
-            "Re-index the corpus to recreate it as IndexFlatIP."
-        )
+        return True
+    return metric == faiss.METRIC_INNER_PRODUCT
 
 
 class _ReadWriteLock:
@@ -560,14 +557,44 @@ class CorpusIndex:
             )
         return faiss.IndexFlatIP(self.embedder.dimensions)
 
-    def _check_dense_metric(self) -> None:
-        """Raise unless the loaded dense index ranks by inner product.
+    def _check_dense_metric(self, *, require_floor: bool = False) -> None:
+        """Validate the dense index metric, proportionally to what is at stake.
 
-        Called before every dense search so a wrong-metric index cannot
-        silently mis-apply ``max_distance`` as ``1 - score`` over L2 distances.
+        A wrong metric only corrupts the *relevance floor*, not ordinary
+        ranking: ``raw_score`` still orders hits correctly either way, since
+        smaller-is-better is handled by FAISS itself. So:
+
+        - plain search: warn once and continue. Refusing here would make an
+          unexpected index unusable for the feature that does not depend on it.
+        - a search that sets ``max_distance``: raise. There the identity
+          ``similarity == raw_score`` is load-bearing, and a silent mis-filter
+          would drop the best chunks.
         """
-        if self._faiss_index is not None:
-            _assert_inner_product(self._faiss_index)
+        if self._faiss_index is None:
+            return
+        if _scores_are_cosine(self._faiss_index):
+            return
+
+        if require_floor:
+            import faiss
+
+            raise RuntimeError(
+                "The dense index does not rank by inner product "
+                f"(metric_type={getattr(self._faiss_index, 'metric_type', None)!r}, "
+                f"expected faiss.METRIC_INNER_PRODUCT={faiss.METRIC_INNER_PRODUCT}), "
+                "so raw_score is not a cosine similarity and max_distance "
+                "(1 - cosine) cannot be applied. Omit max_distance, or re-index "
+                "to recreate the index as IndexFlatIP."
+            )
+
+        if not getattr(self, "_metric_warned", False):
+            self._metric_warned = True
+            logger.warning(
+                "Corpus '%s': dense index does not rank by inner product, so "
+                "raw_score is not a cosine similarity and max_distance is "
+                "unavailable for this corpus. Plain search is unaffected.",
+                self.corpus.name,
+            )
 
     def _load(self):
         """Load existing index and metadata from disk.
@@ -874,8 +901,6 @@ class CorpusIndex:
         else:
             self._faiss_index = faiss.IndexFlatIP(self.embedder.dimensions)
 
-        _assert_inner_product(self._faiss_index)
-
         self._chunks = keep_chunks
         # Rebuild stable ID lookup map after reordering
         self._rebuild_stable_id_map()
@@ -931,7 +956,6 @@ class CorpusIndex:
         if force:
             import faiss
             self._faiss_index = faiss.IndexFlatIP(self.embedder.dimensions)
-            _assert_inner_product(self._faiss_index)
             self._chunks = []
             self._file_hashes = {}
             self._rebuild_stable_id_map()
@@ -1088,7 +1112,9 @@ class CorpusIndex:
             if faiss_index is None or faiss_index.ntotal == 0:
                 return []
 
-            _assert_inner_product(faiss_index)
+            # Warn-only here: CorpusIndex.search does not know whether the
+            # caller applies a floor. Searcher raises when one is requested.
+            self._check_dense_metric()
 
             # Over-fetch to compensate for stale results that will be filtered out
             fetch_k = min(top_k * 3, faiss_index.ntotal)
@@ -1167,7 +1193,14 @@ class CorpusIndex:
                 "section_id": chunk.section_id,
             }
 
-    def search_section(self, query_vector: np.ndarray, section_filter: str, top_k: int = 5) -> list[dict]:
+    def search_section(
+        self,
+        query_vector: np.ndarray,
+        section_filter: str,
+        top_k: int = 5,
+        *,
+        require_floor: bool = False,
+    ) -> list[dict]:
         """
         Search within a specific section using brute-force cosine similarity.
 
@@ -1188,7 +1221,7 @@ class CorpusIndex:
         if faiss_index is None or faiss_index.ntotal == 0:
             return []
 
-        _assert_inner_product(faiss_index)
+        self._check_dense_metric(require_floor=require_floor)
 
         # Try direct section_id match first
         positions = section_to_positions.get(section_filter, [])

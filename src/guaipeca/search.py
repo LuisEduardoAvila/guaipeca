@@ -172,6 +172,12 @@ class Searcher:
             for name in search_corpora:
                 corpus_idx = self.corpora[name]
                 floor = self._resolve_max_distance(name, max_distance)
+                if floor is not None:
+                    # The floor compares against cosine similarity. On an index
+                    # that does not rank by inner product that comparison is
+                    # wrong in direction, not just imprecise, so refuse rather
+                    # than mis-filter. Plain search stays available either way.
+                    corpus_idx._check_dense_metric(require_floor=True)
                 dense_results = corpus_idx.search(query_vector, top_k=per_corpus_k)
                 if floor is not None:
                     floor_active = True
@@ -185,6 +191,8 @@ class Searcher:
             for name in search_corpora:
                 corpus_idx = self.corpora[name]
                 floor = self._resolve_max_distance(name, max_distance)
+                if floor is not None:
+                    corpus_idx._check_dense_metric(require_floor=True)
                 results = corpus_idx.search(query_vector, top_k=per_corpus_k)
                 if floor is not None:
                     floor_active = True
@@ -635,7 +643,9 @@ class Searcher:
         for name in corpora:
             corpus_idx = self.corpora[name]
             floor = self._resolve_max_distance(name, max_distance)
-            results = corpus_idx.search_section(query_vector, section_filter, top_k=top_k)
+            results = corpus_idx.search_section(
+                query_vector, section_filter, top_k=top_k, require_floor=floor is not None
+            )
             if floor is not None:
                 floor_active = True
                 results, dropped = self._filter_by_distance(results, floor)
