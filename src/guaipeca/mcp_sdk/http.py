@@ -7,13 +7,16 @@ Serves one Starlette app under uvicorn::
     /tools                  tool listing (convenience endpoint)
     /download/{c}/{f}       file download
     DELETE /documents       delete an uploaded file
-    /sse, /messages         410 with an explanation (legacy transport removed)
+    /sse, /messages         legacy SSE transport (GET stream + POST messages)
 
 The SDK owns everything MCP-shaped — session handling, protocol-version
 routing (handshake vs 2026-07-28 stateless requests), JSON parsing, the
 request-body limit and DNS-rebinding protection. This module wires the
 existing ``GuaipecaMCPServer`` into it and re-implements only what the SDK has
-no equivalent for.
+no equivalent for. The legacy SSE transport is served by the SDK's own
+``MCPServer.sse_app()``, built around this module's low-level server (see
+:func:`_build_sse_app`); its two routes are merged into the app below so the
+same CORS wrapper applies.
 
 Security notes
 --------------
@@ -26,6 +29,11 @@ Security notes
   only installs the BearerAuthBackend that can validate it when ``auth`` is
   also set - a verifier on its own 401s every request. OAuth discovery routes
   appear only when ``auth_server_provider`` is passed, which we do not.
+* The SSE routes are built by ``MCPServer.sse_app()``, outside the SDK's auth
+  configuration (which covers ``/mcp`` only), so they bypass that wrapper.
+  :func:`_guard_asgi` re-applies the same Bearer check as the custom routes
+  before merging them; without it a token-protected server would expose
+  ``/sse`` and ``/messages`` unauthenticated.
 """
 
 from __future__ import annotations
@@ -43,6 +51,7 @@ from typing import TYPE_CHECKING, Any
 from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.routing import Route
 
@@ -269,29 +278,77 @@ def _server_config(config: GuaipecaConfig) -> Any:
     return getattr(config, "server", None)
 
 
-def _legacy_removed():
-    """Handler for the retired ``/sse`` and ``/messages`` endpoints.
+def _build_sse_app(
+    lowlevel_server: Any,
+    *,
+    max_body_size: int,
+    allowed_origins: list[str] | None,
+    host: str,
+) -> Any:
+    """Build the legacy SSE Starlette app around an existing low-level server.
 
-    Returns 410 Gone, not 404: the routes were removed on purpose, and a stale
-    SSE client should get a body it can act on rather than a silent hang.
+    ``MCPServer.sse_app()`` is the SDK's ready-made transport: on ``GET /sse``
+    it opens an SSE stream and emits an ``endpoint`` event pointing at
+    ``POST /messages?session_id=...``. It drives whatever server sits on
+    ``_lowlevel_server``, and the SDK exposes no public way to swap that — so
+    the assignment below is deliberate and is the only way to keep our
+    existing tool registry (:func:`guaipeca.mcp_sdk.tools.build_server`).
+    ``tests/test_mcp_sdk_tools.py::test_mcpserver_still_exposes_lowlevel_attribute``
+    guards the private attribute so an SDK upgrade fails loudly instead of
+    silently losing ``/sse``.
+
+    ``message_path`` is ``/messages`` without the trailing slash: that is the
+    URL the hand-rolled server used, and a stale client must not receive a
+    404 when it replays its old endpoint.
+
+    The returned app carries no Bearer check of its own; ``build_app`` passes it
+    through :func:`_guard_asgi` before merging its routes.
     """
+    from mcp.server.mcpserver.server import MCPServer
 
-    async def _handler(request: Any) -> JSONResponse:
-        return JSONResponse(
-            {
-                "error": "legacy SSE transport removed",
-                "message": (
-                    "The legacy SSE transport (GET /sse + POST /messages) was removed in the "
-                    "MCP SDK migration. Use POST /mcp instead: it serves both the session-based "
-                    "handshake and the 2026-07-28 stateless protocol."
-                ),
-                "use": "/mcp",
-                "protocol_versions": ["2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28"],
-            },
-            status_code=410,
-        )
+    wrapper = MCPServer("guaipeca")
+    # Intentional: reuse the Server built by build_server(), with Guaipeca's
+    # tools, instead of a fresh one with only the SDK's defaults.
+    wrapper._lowlevel_server = lowlevel_server
+    return wrapper.sse_app(
+        sse_path="/sse",
+        # "/messages/" with the trailing slash, deliberately. The SDK routes this
+        # as a Mount, so the canonical path is "/messages/"; advertising
+        # "/messages" makes Starlette's redirect_slashes answer a legacy
+        # client's POST with a 307, which most SSE clients do not follow for a
+        # POST (the request body is dropped and the session never reaches the
+        # transport). The old hand-rolled server accepted both.
+        message_path="/messages/",
+        max_request_body_size=max_body_size,
+        transport_security=_security_settings(host, allowed_origins),
+        host=host,
+    )
 
-    return _handler
+
+def _guard_asgi(endpoint: Any, auth_token: str | None) -> Any:
+    """Require our Bearer token in front of a single ASGI callable.
+
+    ``sse_app()`` is built by the SDK outside ``build_app``'s auth
+    configuration (that only covers ``/mcp``), so without this ``/sse`` and
+    ``/messages`` would be the one unauthenticated way in when a token is set.
+    A request without a valid token is answered with our usual 401 body before
+    the SSE transport sees it. No token configured means no wrapper, matching
+    the other custom routes.
+    """
+    if not auth_token:
+        return endpoint
+
+    async def _guarded(scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await endpoint(scope, receive, send)
+            return
+        request = Request(scope, receive)
+        if not _check_bearer(request, auth_token):
+            await _unauthorized()(scope, receive, send)
+            return
+        await endpoint(scope, receive, send)
+
+    return _guarded
 
 
 def _health(server_instance: GuaipecaMCPServer):
@@ -429,8 +486,6 @@ def build_app(
             methods=["GET"],
         ),
         Route("/documents", _delete_documents(server_instance, auth_token), methods=["DELETE"]),
-        Route("/sse", _legacy_removed(), methods=["GET", "POST", "DELETE"]),
-        Route("/messages", _legacy_removed(), methods=["GET", "POST", "DELETE"]),
     ]
 
     kwargs: dict[str, Any] = {
@@ -462,6 +517,28 @@ def build_app(
         kwargs["token_verifier"] = _HmacTokenVerifier(auth_token)
 
     app = srv.streamable_http_app(**kwargs)
+
+    # Legacy SSE transport. Its two routes are absolute (``/sse``,
+    # ``/messages``), so they are appended to the SDK app's route table rather
+    # than mounted under a prefix; wrapping the whole thing in
+    # _CorsMiddleware() then applies CORS to them as well. The routes share one
+    # wrapper around the SSE app, which re-applies our Bearer check because the
+    # SDK built that app without our auth configuration (see _guard_asgi).
+    sse_app = _build_sse_app(
+        srv,
+        max_body_size=max_body_size,
+        allowed_origins=allowed_origins,
+        host=bind_host,
+    )
+    # Wrapped, not mounted: Mount strips the matched prefix from
+    # ``scope["path"]``, so the SDK's inner routes (which expect the absolute
+    # "/sse") would stop matching, and ``route.app`` is the endpoint itself, not
+    # the Starlette. Guarding per route keeps each endpoint's own semantics and
+    # applies the Bearer check that sse_app() does not put on these two paths.
+    for route in getattr(sse_app, "routes", ()):
+        route.app = _guard_asgi(route.app, auth_token)
+        app.routes.append(route)
+
     return _CorsMiddleware(app, auth_token, allowed_origins)
 
 

@@ -253,6 +253,36 @@ def test_all_registered_handlers_are_async_or_threaded():
     )
 
 
+def test_mcpserver_still_exposes_lowlevel_attribute():
+    """Guaipeca's SSE transport depends on a private attribute of the SDK.
+
+    ``guaipeca.mcp_sdk.http._build_sse_app()`` builds the legacy ``/sse`` +
+    ``/messages`` transport with ``MCPServer.sse_app()``, which drives whatever
+    low-level ``Server`` sits on ``MCPServer._lowlevel_server``. That is the
+    only way to serve our existing tool registry over SSE, and it is private
+    API. If an SDK upgrade renames or removes it, this test fails here with
+    this explanation instead of the service either erroring at import or
+    silently losing ``/sse`` at runtime.
+
+    Action when this fails: revisit guaipeca's SSE transport (see
+    ``_build_sse_app``), do not just relax the assertion.
+    """
+    from mcp.server.mcpserver.server import MCPServer
+
+    assert hasattr(MCPServer("x"), "_lowlevel_server"), (
+        "MCPServer no longer has a '_lowlevel_server' attribute. Guaipeca's "
+        "SSE transport (guaipeca.mcp_sdk.http._build_sse_app) injects our "
+        "build_server() instance through it so /sse serves the real tools. "
+        "Find the SDK's new hook and update _build_sse_app; do not drop the "
+        "attribute check."
+    )
+    assert hasattr(MCPServer, "sse_app"), (
+        "MCPServer.sse_app() is gone. Guaipeca's legacy SSE transport "
+        "(/sse + /messages) is built from it; reimplement it or restore the "
+        "endpoints deliberately."
+    )
+
+
 def test_run_imports_the_sdk_before_starting_any_transport():
     """``GuaipecaMCPServer.run()`` must import the SDK stack before spawning threads.
 

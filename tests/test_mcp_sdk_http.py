@@ -267,21 +267,90 @@ def test_health_requires_auth_when_configured(auth_client):
     assert response.status_code == 200
 
 
-# ---- 6. /sse removal --------------------------------------------------------
+# ---- 6. Legacy SSE transport ----------------------------------------------
+#
+# GET /sse streams, so these tests never read the stream to exhaustion: an SSE
+# response body does not end until the server-side session closes, and a full
+# read would hang. The handshake test therefore asserts on status and headers
+# first, and only then peeks at the first chunk. The chunk assertion is skipped
+# if the client cannot hand one over; a weaker deterministic assertion beats a
+# flaky stronger one.
 
 
-def test_get_sse_reports_removal(client):
-    response = client.get("/sse")
-    assert response.status_code == 410
-    body = response.json()
-    assert "/mcp" in body["use"]
-    assert "removed" in body["error"]
+def _first_sse_chunk(response) -> str | None:
+    """First chunk of a streamed response, or None if streaming is unavailable.
+
+    Reads exactly one chunk: the stream stays open until the session closes, so
+    anything that drains it would hang the test.
+    """
+    chunks = getattr(response, "iter_bytes", None)
+    if chunks is None:
+        return None
+    iterator = chunks()
+    try:
+        return next(iterator).decode("utf-8", "replace")
+    except StopIteration:
+        return ""
+    finally:
+        iterator.close()
 
 
-def test_post_messages_reports_removal(client):
-    response = client.post("/messages?session_id=abc", json={"jsonrpc": "2.0", "id": 1})
-    assert response.status_code == 410
-    assert response.json()["use"] == "/mcp"
+def test_sse_handshake_sends_endpoint_event(client):
+    """GET /sse opens a stream and announces the POST /messages endpoint."""
+    with client.stream(
+        "GET", "/sse", headers={"Accept": "text/event-stream"}
+    ) as response:
+        assert response.status_code == 200, response.read()
+        assert response.headers["content-type"].startswith("text/event-stream")
+        chunk = _first_sse_chunk(response)
+
+    if chunk is None:  # streaming helper unavailable: headers-only assertion
+        return
+    # The SDK writes the endpoint event as `event: endpoint` + `data: <url>`.
+    assert "event: endpoint" in chunk, chunk
+    # Canonical path carries the trailing slash: the SDK routes this as a
+    # Mount, so "/messages" would 307 on POST and most SSE clients drop the
+    # body rather than follow. See test_sse_endpoint_does_not_redirect_post.
+    assert "/messages/?session_id=" in chunk, chunk
+
+
+def test_sse_requires_auth_when_configured(auth_client):
+    """No token is 401 (and a bad token too); the stream never opens."""
+    assert auth_client.get("/sse", headers={"Accept": "text/event-stream"}).status_code == 401
+    assert (
+        auth_client.get(
+            "/sse",
+            headers={"Accept": "text/event-stream", "Authorization": "Bearer wrong-token"},
+        ).status_code
+        == 401
+    )
+
+
+def test_post_messages_unknown_session_is_4xx(client):
+    """POST /messages with an unknown session_id is a client error, not a 5xx."""
+    response = client.post(
+        "/messages?session_id=does-not-exist",
+        json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+    )
+    assert 400 <= response.status_code < 500, response.text
+
+
+def test_post_messages_without_session_id_is_4xx(client):
+    """POST /messages with no session_id is a client error."""
+    response = client.post(
+        "/messages",
+        json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+    )
+    assert 400 <= response.status_code < 500, response.text
+
+
+def test_post_messages_requires_auth_when_configured(auth_client):
+    """POST /messages without a token is 401, before the transport sees it."""
+    response = auth_client.post(
+        "/messages?session_id=abc",
+        json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+    )
+    assert response.status_code == 401, response.text
 
 
 # ---- 7. Auth on /mcp --------------------------------------------------------
@@ -484,3 +553,48 @@ def test_acao_echoes_validated_origin(client):
     )
     assert response.status_code == 200, response.text
     assert response.headers.get("access-control-allow-origin") == "http://localhost:3000"
+
+
+def test_sse_endpoint_does_not_redirect_post(client):
+    """The advertised message path must accept POST without a redirect.
+
+    Found only by driving a real SSE client: the SDK routes the message path as
+    a Starlette ``Mount``, so ``/messages`` 307s to ``/messages/``. Most SSE
+    clients do not follow a redirect on POST - the body is dropped and the
+    session never reaches the transport - so the handshake appears to hang
+    rather than fail. The transport therefore advertises the canonical
+    trailing-slash path.
+
+    The POST happens inside the stream context: once the GET closes, the
+    session is torn down and any POST is a 404 regardless of its path, which
+    would let this test pass without proving anything about redirects.
+    """
+    with client.stream(
+        "GET", "/sse", headers={"Accept": "text/event-stream"}
+    ) as response:
+        assert response.status_code == 200
+
+        endpoint = None
+        lines = response.iter_lines()
+        for line in lines:
+            if line.startswith("data:") and "/messages" in line:
+                endpoint = line[5:].strip()
+                break
+
+        assert endpoint, "no endpoint event was sent"
+        assert "/messages/?" in endpoint, (
+            f"the advertised message path {endpoint!r} is not the canonical "
+            "'/messages/' - POSTing to it will redirect and drop the body"
+        )
+
+        post = client.post(
+            endpoint,
+            json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            follow_redirects=False,
+        )
+        assert post.status_code != 307, (
+            f"POST {endpoint} redirected to {post.headers.get('location')}"
+        )
+        assert post.status_code == 202, (
+            f"expected 202 Accepted from a live session, got {post.status_code}"
+        )
