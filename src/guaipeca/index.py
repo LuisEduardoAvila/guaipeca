@@ -38,6 +38,34 @@ logger = logging.getLogger(__name__)
 STALE_REBUILD_THRESHOLD = 0.10
 
 
+def _scores_are_cosine(index) -> bool:
+    """Whether *index* ranks dense hits by cosine similarity.
+
+    Search ranks dense hits by ``raw_score``, and issue #12 exposes that as the
+    relevance floor ``max_distance``: keep only hits with ``raw_score >=
+    1 - max_distance``. That identity holds only for inner-product search over
+    L2-normalised vectors, where the score IS the cosine similarity. A flat L2
+    index returns *smaller* scores for better matches, so the same comparison
+    would keep the worst chunks and drop the best.
+
+    Deliberately a predicate rather than an assert. Raising unconditionally
+    would make any unexpected index unusable for *plain* searching, which needs
+    no cosine interpretation at all - turning a niche configuration into an
+    outage. Callers decide: search warns and continues, while a request that
+    actually sets ``max_distance`` refuses, because only there is the identity
+    load-bearing.
+
+    ``metric_type is None`` means "cannot tell" (a test double or a wrapper),
+    not "wrong metric": real index objects always report an int.
+    """
+    import faiss
+
+    metric = getattr(index, "metric_type", None)
+    if metric is None:
+        return True
+    return metric == faiss.METRIC_INNER_PRODUCT
+
+
 class _ReadWriteLock:
     """Simple read-write lock using threading.Condition.
 
@@ -163,6 +191,13 @@ class CorpusIndex:
         # Serializes lazy loading: only one thread may populate index state from
         # disk at a time; others wait and then reuse the loaded index.
         self._load_lock = threading.Lock()
+
+        # Inter-process index lock state. _lock_failure records why the last
+        # _acquire_lock() gave up, so callers can distinguish "another indexer
+        # is running" from "the lock file itself is unusable".
+        self._lock_kind: str | None = None
+        self._lock_fd = None
+        self._lock_failure: str | None = None
 
     def _file_hash(self, file_path: str) -> str:
         """SHA256 hash of file content."""
@@ -442,6 +477,14 @@ class CorpusIndex:
             if idx < 0 or idx >= len(chunks_snapshot):
                 continue
 
+            # A zero BM25 score is the absence of a match, not a weak one:
+            # bm25s returns top_k*3 rows regardless of relevance, so padding
+            # arrives with score 0.0. Keeping them makes hybrid look noisy and
+            # hands the relevance floor nothing to judge (there is no dense
+            # score on a sparse-only hit).
+            if float(score) <= 0.0:
+                continue
+
             chunk = chunks_snapshot[idx]
 
             # Filter out stale results
@@ -514,6 +557,45 @@ class CorpusIndex:
             )
         return faiss.IndexFlatIP(self.embedder.dimensions)
 
+    def _check_dense_metric(self, *, require_floor: bool = False) -> None:
+        """Validate the dense index metric, proportionally to what is at stake.
+
+        A wrong metric only corrupts the *relevance floor*, not ordinary
+        ranking: ``raw_score`` still orders hits correctly either way, since
+        smaller-is-better is handled by FAISS itself. So:
+
+        - plain search: warn once and continue. Refusing here would make an
+          unexpected index unusable for the feature that does not depend on it.
+        - a search that sets ``max_distance``: raise. There the identity
+          ``similarity == raw_score`` is load-bearing, and a silent mis-filter
+          would drop the best chunks.
+        """
+        if self._faiss_index is None:
+            return
+        if _scores_are_cosine(self._faiss_index):
+            return
+
+        if require_floor:
+            import faiss
+
+            raise RuntimeError(
+                "The dense index does not rank by inner product "
+                f"(metric_type={getattr(self._faiss_index, 'metric_type', None)!r}, "
+                f"expected faiss.METRIC_INNER_PRODUCT={faiss.METRIC_INNER_PRODUCT}), "
+                "so raw_score is not a cosine similarity and max_distance "
+                "(1 - cosine) cannot be applied. Omit max_distance, or re-index "
+                "to recreate the index as IndexFlatIP."
+            )
+
+        if not getattr(self, "_metric_warned", False):
+            self._metric_warned = True
+            logger.warning(
+                "Corpus '%s': dense index does not rank by inner product, so "
+                "raw_score is not a cosine similarity and max_distance is "
+                "unavailable for this corpus. Plain search is unaffected.",
+                self.corpus.name,
+            )
+
     def _load(self):
         """Load existing index and metadata from disk.
 
@@ -578,6 +660,7 @@ class CorpusIndex:
 
         # Load FAISS index (with backup recovery)
         self._faiss_index = self._load_faiss_with_recovery()
+        self._check_dense_metric()
 
         # Rebuild stable ID lookup map
         self._rebuild_stable_id_map()
@@ -632,22 +715,52 @@ class CorpusIndex:
         Acquire an exclusive file lock for indexing this corpus.
 
         Uses fcntl.flock on POSIX and msvcrt.locking on Windows. Returns True
-        if the lock was acquired, False if another process holds it. If
-        neither mechanism is available the lock is skipped (with a warning)
-        so indexing still runs.
+        if the lock was acquired, False if it was not. On failure, the reason
+        is recorded in ``self._lock_failure`` so callers can tell the cases
+        apart and word the error accordingly.
+
+        Three modes, two of which fail CLOSED (return False):
+
+        * ``fcntl`` / ``msvcrt`` available, region free -> True. The descriptor
+          stays open until ``_release_lock()``.
+        * ``fcntl`` / ``msvcrt`` available, region held by another process ->
+          False, ``_lock_failure = "held by another process"``. Fail closed:
+          a second indexer must not write metadata.json / FAISS concurrently.
+        * Lock file could not be opened (permissions, a directory at that
+          path, a path too long, an antivirus share-mode denial on Windows)
+          -> False, ``_lock_failure = "lock file could not be opened: <err>"``.
+          Fail closed: without a descriptor there can be no lock, and
+          proceeding unlocked is what let two indexers interleave before.
+
+        Fail-open mode, deliberately kept: if neither fcntl nor msvcrt can be
+        imported there is no locking primitive on this platform at all. A
+        warning is logged and True is returned so indexing still runs, since
+        refusing to index would break the tool everywhere such a platform
+        exists. ``_lock_failure`` is left None in this mode.
+
+        The file is opened ``"a+b"`` (O_CREAT|O_RDWR|O_APPEND). Never ``"w"``:
+        opening with ``"w"`` truncated the lock file before any lock was taken,
+        which on Windows can make the OS reject the truncation while another
+        process holds byte 0 -- and that rejection used to be swallowed into
+        "proceeding unlocked". ``a+b`` creates the file if missing and never
+        truncates; ``seek(0)`` below positions the msvcrt byte-range lock.
 
         Without a platform lock, two concurrent index runs against the same
         corpus can interleave their writes to metadata.json / *.faiss and
         produce a corrupt or half-updated index.
         """
         self._lock_kind = None
+        self._lock_failure = None
         try:
-            self._lock_fd = open(self.lock_path, "w")
+            self._lock_fd = open(self.lock_path, "a+b")
         except OSError as e:
-            logger.warning("Could not open lock file %s: %s; proceeding unlocked",
-                           self.lock_path, e)
             self._lock_fd = None
-            return True
+            self._lock_failure = f"lock file could not be opened: {e}"
+            logger.warning(
+                "Could not open lock file %s: %s; refusing to index unlocked",
+                self.lock_path, e,
+            )
+            return False
 
         try:
             import fcntl
@@ -660,6 +773,7 @@ class CorpusIndex:
                 self._lock_kind = "fcntl"
                 return True
             except OSError:
+                self._lock_failure = "held by another process"
                 self._close_lock_fd()
                 return False
 
@@ -677,6 +791,7 @@ class CorpusIndex:
                 self._lock_kind = "msvcrt"
                 return True
             except OSError:
+                self._lock_failure = "held by another process"
                 self._close_lock_fd()
                 return False
 
@@ -714,6 +829,10 @@ class CorpusIndex:
             pass
         self._close_lock_fd()
         self._lock_kind = None
+        # A released lock is no longer a reason for the next index() to report
+        # a failure; _acquire_lock() resets it anyway, but keep the invariant
+        # (failure reason implies no lock held) true after release as well.
+        self._lock_failure = None
 
     def _scan_files(self) -> list[str]:
         """Scan corpus directory for files to index."""
@@ -798,9 +917,20 @@ class CorpusIndex:
         """
         # Acquire file lock to prevent concurrent indexing of the same corpus
         if not self._acquire_lock():
+            # Distinguish contention from an unusable lock file. The contention
+            # message is kept verbatim: scripts and users already match on it.
+            if self._lock_failure == "held by another process":
+                return {
+                    "corpus": self.corpus.name,
+                    "error": f"indexing in progress for corpus {self.corpus.name}",
+                }
+            reason = self._lock_failure or "unknown lock error"
             return {
                 "corpus": self.corpus.name,
-                "error": f"indexing in progress for corpus {self.corpus.name}",
+                "error": (
+                    f"could not acquire lock for corpus {self.corpus.name}: "
+                    f"{reason}; refusing to index"
+                ),
             }
 
         try:
@@ -982,6 +1112,10 @@ class CorpusIndex:
             if faiss_index is None or faiss_index.ntotal == 0:
                 return []
 
+            # Warn-only here: CorpusIndex.search does not know whether the
+            # caller applies a floor. Searcher raises when one is requested.
+            self._check_dense_metric()
+
             # Over-fetch to compensate for stale results that will be filtered out
             fetch_k = min(top_k * 3, faiss_index.ntotal)
 
@@ -1018,6 +1152,9 @@ class CorpusIndex:
                 "topic": self.corpus.topic,
                 "score": weighted_score,
                 "raw_score": float(score),
+                # 1 - cosine similarity. Debug field: distance is None means the
+                # hit came only from BM25 (no dense score to measure).
+                "distance": 1.0 - float(score),
                 "heading_path": chunk.heading_path,
                 "section_id": chunk.section_id,
             })
@@ -1056,7 +1193,14 @@ class CorpusIndex:
                 "section_id": chunk.section_id,
             }
 
-    def search_section(self, query_vector: np.ndarray, section_filter: str, top_k: int = 5) -> list[dict]:
+    def search_section(
+        self,
+        query_vector: np.ndarray,
+        section_filter: str,
+        top_k: int = 5,
+        *,
+        require_floor: bool = False,
+    ) -> list[dict]:
         """
         Search within a specific section using brute-force cosine similarity.
 
@@ -1073,6 +1217,11 @@ class CorpusIndex:
             faiss_index = self._faiss_index
             chunks_snapshot = list(self._chunks)
             section_to_positions = dict(self._section_to_positions)
+
+        if faiss_index is None or faiss_index.ntotal == 0:
+            return []
+
+        self._check_dense_metric(require_floor=require_floor)
 
         # Try direct section_id match first
         positions = section_to_positions.get(section_filter, [])
@@ -1139,6 +1288,8 @@ class CorpusIndex:
                 "topic": self.corpus.topic,
                 "score": weighted_score,
                 "raw_score": float(scores[i]),
+                # 1 - cosine similarity (see search()).
+                "distance": 1.0 - float(scores[i]),
                 "heading_path": chunk.heading_path,
                 "section_id": chunk.section_id,
             })

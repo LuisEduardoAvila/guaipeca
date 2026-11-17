@@ -78,6 +78,10 @@ class CorpusConfig:
     topic: str = ""
     weight: float = 1.0
     extensions: list[str] = field(default_factory=lambda: [".md", ".txt"])
+    # Relevance floor for dense (cosine) hits in this corpus: keep only chunks
+    # with cosine similarity >= 1 - max_distance. None (default) = no floor,
+    # preserving the pre-#12 behaviour. BM25-only hits are never filtered.
+    max_distance: float | None = None
 
     def __post_init__(self):
         # Expand ~ in path
@@ -140,6 +144,9 @@ class SearchConfig:
     toc_rerank: bool = False     # Enable ToC keyword re-ranking (Phase 5)
     toc_rerank_weight: float = 0.3  # Weight for ToC re-ranking boost
     fusion_alpha: float = 0.3    # Score-vs-rank blend in normalized RRF (0=pure rank, 1=pure score)
+    # Global relevance floor for dense hits. None (default) = disabled. A corpus
+    # may override it with its own corpus.max_distance.
+    max_distance: float | None = None
 
 
 @dataclass
@@ -213,6 +220,7 @@ class GuaipecaConfig:
                 topic=c.get("topic", ""),
                 weight=c.get("weight", 1.0),
                 extensions=c.get("extensions", [".md", ".txt"]),
+                max_distance=c.get("max_distance"),
             ))
 
         # Parse embedding
@@ -284,6 +292,7 @@ class GuaipecaConfig:
             toc_rerank=srch.get("toc_rerank", False),
             toc_rerank_weight=srch.get("toc_rerank_weight", 0.3),
             fusion_alpha=srch.get("fusion_alpha", 0.3),
+            max_distance=srch.get("max_distance"),
         )
 
         config = cls(
@@ -313,6 +322,15 @@ class GuaipecaConfig:
             if not isinstance(c.weight, (int, float)):
                 logger.warning(f"Corpus '{c.name}' weight is not numeric ({type(c.weight).__name__}), defaulting to 1.0")
                 c.weight = 1.0
+            if c.max_distance is not None and (
+                isinstance(c.max_distance, bool)
+                or not isinstance(c.max_distance, (int, float))
+                or c.max_distance < 0
+            ):
+                raise ValueError(
+                    f"corpora[{c.name}].max_distance must be null or a number >= 0 "
+                    f"(1 - cosine similarity), got: {c.max_distance!r}"
+                )
 
         # Chunking config
         if not isinstance(self.chunking.max_size, int) or self.chunking.max_size < 1:
@@ -366,6 +384,15 @@ class GuaipecaConfig:
             raise ValueError(f"search.rrf_k must be a positive integer, got: {self.search.rrf_k!r}")
         if not isinstance(self.search.max_chars, int) or self.search.max_chars < 1:
             raise ValueError(f"search.max_chars must be a positive integer, got: {self.search.max_chars!r}")
+        if self.search.max_distance is not None and (
+            isinstance(self.search.max_distance, bool)
+            or not isinstance(self.search.max_distance, (int, float))
+            or self.search.max_distance < 0
+        ):
+            raise ValueError(
+                "search.max_distance must be null or a number >= 0 "
+                f"(1 - cosine similarity), got: {self.search.max_distance!r}"
+            )
 
     def get_corpus(self, name: str) -> CorpusConfig | None:
         """Find a corpus by name."""

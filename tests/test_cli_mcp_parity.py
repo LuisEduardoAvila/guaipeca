@@ -91,11 +91,18 @@ def test_search_cli_accepts_extra_flags():
         "--max-chars", "1234",
         "--section-mode",
         "--section-filter", "Chapter 3",
+        "--max-distance", "0.4",
     ])
     assert args.return_mode == "auto"
     assert args.max_chars == 1234
     assert args.section_mode is True
     assert args.section_filter == "Chapter 3"
+    assert args.max_distance == 0.4
+
+
+def test_search_max_distance_defaults_to_none():
+    """Omitting --max-distance must not invent a floor (issue #12)."""
+    assert build_parser().parse_args(["search", "query"]).max_distance is None
 
 
 @pytest.mark.parametrize(

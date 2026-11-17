@@ -42,6 +42,11 @@ Usage
     python tools/eval_retrieval.py --queries ... --top-k 5,10 --json out.json
     python tools/eval_retrieval.py --queries ... --modes dense,hybrid
 
+    # Calibrate a relevance floor (issue #12). No defaults are derived in code;
+    # this exists so the numbers quoted in a PR can be reproduced.
+    python tools/eval_retrieval.py --calibrate --on-topic "HFM consolidation" \
+        --off-topic "sourdough starter" --off-topic "nginx reverse proxy"
+
 Exit code is 0 always (this is a measurement tool, not a gate); use --fail-on
 later if you want CI gating.
 """
@@ -172,8 +177,22 @@ def evaluate_mode(
     re-instantiation is needed.
     """
     # Toggle toc_rerank on the live config (read at query time by Searcher).
+    original_toc = searcher.config.search.toc_rerank
     searcher.config.search.toc_rerank = toc_rerank
+    try:
+        return _evaluate_mode_inner(searcher, queries, hybrid, top_k)
+    finally:
+        # Restore: leaving the flag flipped made later measurement modes (and
+        # anything sharing the config) run with a setting the caller never chose.
+        searcher.config.search.toc_rerank = original_toc
 
+
+def _evaluate_mode_inner(
+    searcher,
+    queries: list[dict],
+    hybrid: bool,
+    top_k: int,
+) -> dict:
     ranks: list[int | None] = []
     per_query = []
 
@@ -211,9 +230,9 @@ def evaluate_mode(
     mrr = (sum(1.0 / r for r in ranks if r is not None) / n) if n else 0.0
 
     return {
-        "mode": f"hybrid={hybrid},toc_rerank={toc_rerank}",
+        "mode": f"hybrid={hybrid},toc_rerank={searcher.config.search.toc_rerank}",
         "hybrid": hybrid,
-        "toc_rerank": toc_rerank,
+        "toc_rerank": searcher.config.search.toc_rerank,
         "top_k": top_k,
         "n_scored": n,
         "hits": hits,
@@ -274,6 +293,118 @@ def parse_top_k(value: str) -> list[int]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Relevance-floor calibration (issue #12)
+#
+# Reports the top-1 dense cosine similarity for supplied on-topic and off-topic
+# queries, per corpus, and the separation point between the two groups. Search
+# scores dense hits by cosine similarity, so the floor user-facing knob
+# `max_distance` is simply 1 - that similarity. Nothing here is wired into
+# defaults: it is a measurement, printed for a human to read.
+# ---------------------------------------------------------------------------
+
+
+def _top1_dense(searcher, query: str, corpora: list[str]) -> dict[str, float | None]:
+    """Per-corpus best dense cosine similarity for *query*.
+
+    Uses the corpus index directly rather than Searcher.search(), because the
+    latter fuses and re-scores; the floor is applied to raw dense hits before
+    fusion, so that is what must be measured.
+    """
+    vector = searcher.embedder.embed_query(query)
+    best: dict[str, float | None] = {}
+    for name in corpora:
+        hits = searcher.corpora[name].search(vector, top_k=1)
+        best[name] = float(hits[0]["raw_score"]) if hits else None
+    return best
+
+
+def calibrate(
+    searcher,
+    on_topic: list[str],
+    off_topic: list[str],
+) -> dict:
+    """Measure on-topic vs off-topic top-1 cosine, per corpus.
+
+    Returns a report dict:
+        {"corpora": [{corpus, on_topic: [...], off_topic: [...],
+                      on_min, off_max, separation, suggested_max_distance}]}
+
+    ``separation`` is on_min - off_max: positive means the two groups are
+    separable at some threshold. ``suggested_max_distance`` is 1 - midpoint of
+    that gap (None when the groups are not separable or a side is missing).
+    """
+    # A corpus that never returns a hit is missing, not measured as 0.0, so the
+    # probe is taken per configured corpus rather than from the union of hits.
+    corpus_names = sorted(searcher.corpora.keys())
+
+    per_corpus = []
+    for name in corpus_names:
+        on_rows = []
+        for q in on_topic:
+            score = _top1_dense(searcher, q, [name])[name]
+            on_rows.append({"query": q, "top1_cosine": score})
+        off_rows = []
+        for q in off_topic:
+            score = _top1_dense(searcher, q, [name])[name]
+            off_rows.append({"query": q, "top1_cosine": score})
+
+        on_scores = [r["top1_cosine"] for r in on_rows if r["top1_cosine"] is not None]
+        off_scores = [r["top1_cosine"] for r in off_rows if r["top1_cosine"] is not None]
+        on_min = min(on_scores) if on_scores else None
+        off_max = max(off_scores) if off_scores else None
+        separation = (
+            on_min - off_max if on_min is not None and off_max is not None else None
+        )
+        suggested = None
+        if separation is not None and separation > 0:
+            suggested = round(1.0 - ((on_min + off_max) / 2.0), 4)
+
+        per_corpus.append({
+            "corpus": name,
+            "on_topic": on_rows,
+            "off_topic": off_rows,
+            "on_min": on_min,
+            "off_max": off_max,
+            "separation": separation,
+            "suggested_max_distance": suggested,
+        })
+
+    return {"corpora": per_corpus}
+
+
+def print_calibration(report: dict) -> None:
+    print()
+    print("=" * 64)
+    print("Relevance-floor calibration (top-1 dense cosine similarity)")
+    print("=" * 64)
+    for corpus in report["corpora"]:
+        print(f"\n  [{corpus['corpus']}]")
+        for row in corpus["on_topic"]:
+            score = row["top1_cosine"]
+            shown = "none" if score is None else f"{score:+.4f}"
+            print(f"    on-topic   {shown:>9}  {row['query'][:48]}")
+        for row in corpus["off_topic"]:
+            score = row["top1_cosine"]
+            shown = "none" if score is None else f"{score:+.4f}"
+            print(f"    off-topic  {shown:>9}  {row['query'][:48]}")
+
+        on_min, off_max = corpus["on_min"], corpus["off_max"]
+        if on_min is None or off_max is None:
+            print("    separation: not measurable (one side returned no hits)")
+            continue
+        gap = corpus["separation"]
+        print(f"    on-topic min : {on_min:+.4f}")
+        print(f"    off-topic max: {off_max:+.4f}")
+        if gap > 0:
+            print(f"    separation   : {gap:+.4f}  (separable)")
+            suggested = corpus["suggested_max_distance"]
+            print(f"    midpoint max_distance: {suggested:g} (1 - cosine)")
+        else:
+            print(f"    separation   : {gap:+.4f}  (overlap: no single threshold separates them)")
+    print()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Measure Guaipeca retrieval quality (recall@k / MRR).",
@@ -282,7 +413,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--config", default="~/.guaipeca/guaipeca.yaml",
                     help="Guaipeca config (default: ~/.guaipeca/guaipeca.yaml)")
-    ap.add_argument("--queries", required=True,
+    ap.add_argument("--queries", default=None,
                     help="Golden query set (.yaml or .json)")
     ap.add_argument("--top-k", default="5", type=parse_top_k,
                     help="Comma-separated k values to report, e.g. 5,10 (default: 5)")
@@ -292,6 +423,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="Also evaluate with toc_rerank enabled")
     ap.add_argument("--json", dest="json_out", default=None,
                     help="Write full results as JSON to this path")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="Report top-1 dense cosine for on/off-topic queries and the separation")
+    ap.add_argument("--on-topic", action="append", default=[],
+                    help="On-topic query for --calibrate (repeatable)")
+    ap.add_argument("--off-topic", action="append", default=[],
+                    help="Off-topic query for --calibrate (repeatable)")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args(argv)
 
@@ -303,6 +440,33 @@ def main(argv: list[str] | None = None) -> int:
 
     config_path = os.path.expanduser(args.config)
     config = GuaipecaConfig.from_yaml(config_path)
+
+    converter = Converter(cache_dir=str(Path(config.indexing.data_dir) / "converted"))
+    embedder = EmbeddingService(
+        model_name=config.embedding.model,
+        cache_dir=config.embedding.cache_dir,
+        dimensions=config.embedding.dimensions,
+        preprocess=config.embedding.preprocess,
+        cache_ttl_seconds=config.embedding.cache_ttl_seconds,
+        cache_max_entries=config.embedding.cache_max_entries,
+    )
+    searcher = Searcher(config=config, embedding_service=embedder, converter=converter)
+
+    if args.calibrate:
+        if not args.on_topic and not args.off_topic:
+            raise SystemExit(
+                "error: --calibrate needs at least one --on-topic or --off-topic query"
+            )
+        print(f"Config: {config_path}")
+        report = calibrate(searcher, args.on_topic, args.off_topic)
+        print_calibration(report)
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"Wrote JSON: {args.json_out}")
+    return 0
+
+    if not args.queries:
+        raise SystemExit("error: --queries is required unless --calibrate is used")
 
     queries = load_golden_set(args.queries)
     scored = [q for q in queries if q["expect"]]
@@ -317,17 +481,6 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Loaded {len(queries)} queries ({len(scored)} scored) from {args.queries}")
     print(f"Config: {config_path}")
-
-    converter = Converter(cache_dir=str(Path(config.indexing.data_dir) / "converted"))
-    embedder = EmbeddingService(
-        model_name=config.embedding.model,
-        cache_dir=config.embedding.cache_dir,
-        dimensions=config.embedding.dimensions,
-        preprocess=config.embedding.preprocess,
-        cache_ttl_seconds=config.embedding.cache_ttl_seconds,
-        cache_max_entries=config.embedding.cache_max_entries,
-    )
-    searcher = Searcher(config=config, embedding_service=embedder, converter=converter)
 
     mode_specs = []
     for m in args.modes.split(","):

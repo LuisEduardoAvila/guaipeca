@@ -183,6 +183,16 @@ TOOLS = [
                         "true; ignored otherwise."
                     ),
                 },
+                "max_distance": {
+                    "type": "number",
+                    "description": (
+                        "Relevance floor for dense hits, expressed as 1 - cosine "
+                        "similarity (0 = identical, 2 = opposite). Hits below the "
+                        "floor are dropped before fusion; a corpus's own setting "
+                        "wins over this. Omit to use the config value (usually no "
+                        "floor). Lower = stricter."
+                    ),
+                },
             },
             "required": ["query"],
         },
@@ -268,9 +278,10 @@ TOOLS = [
     {
         "name": "status",
         "description": (
-            "List the configured corpora with chunk counts, indexed files and "
-            "BM25 availability. Call this first to learn valid corpus names "
-            "before searching or scoping other tools."
+            "List the configured corpora with chunk counts, indexed files, "
+            "BM25 availability and the active relevance floor (max_distance). "
+            "Call this first to learn valid corpus names before searching or "
+            "scoping other tools."
         ),
         "inputSchema": {
             "type": "object",
@@ -584,10 +595,12 @@ class GuaipecaMCPServer:
             max_chars = arguments.get("max_chars")
             section_mode = arguments.get("section_mode", False)
             section_filter = arguments.get("section_filter")
+            max_distance = arguments.get("max_distance")
             result = self.searcher.search(
                 query, top_k=top_k, corpora=corpora, hybrid=hybrid,
                 return_mode=return_mode, max_chars=max_chars,
                 section_mode=section_mode, section_filter=section_filter,
+                max_distance=max_distance,
             )
             # search() reports validation failures as {"results": [], "error": ...}.
             # Returning that as a success made a wrong corpus name look like a

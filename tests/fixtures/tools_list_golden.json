@@ -20,6 +20,10 @@
             "description": "Threshold for auto return_mode (total result chars). Default: 8000.",
             "type": "integer"
           },
+          "max_distance": {
+            "description": "Relevance floor for dense hits, expressed as 1 - cosine similarity (0 = identical, 2 = opposite). Hits below the floor are dropped before fusion; a corpus's own setting wins over this. Omit to use the config value (usually no floor). Lower = stricter.",
+            "type": "number"
+          },
           "query": {
             "description": "Search query text.",
             "type": "string"
@@ -121,7 +125,7 @@
       "name": "index"
     },
     {
-      "description": "List the configured corpora with chunk counts, indexed files and BM25 availability. Call this first to learn valid corpus names before searching or scoping other tools.",
+      "description": "List the configured corpora with chunk counts, indexed files, BM25 availability and the active relevance floor (max_distance). Call this first to learn valid corpus names before searching or scoping other tools.",
       "inputSchema": {
         "properties": {},
         "type": "object"
