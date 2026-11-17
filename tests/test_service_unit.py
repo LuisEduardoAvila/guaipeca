@@ -24,7 +24,11 @@ from pathlib import Path
 import pytest
 
 PROJECT_ROOT = Path(__file__).parent.parent
-UNIT_PATH = PROJECT_ROOT / "guaipeca.service"
+# The installable unit (``guaipeca.service``) is gitignored because it embeds
+# absolute personal paths. The tracked artefact is the template, so that is
+# what these tests validate - otherwise they would pass locally and fail on a
+# fresh clone.
+UNIT_PATH = PROJECT_ROOT / "guaipeca.service.template"
 
 # Directives systemd only honours in [Unit]. In [Service] they are ignored and
 # logged as "Unknown key ... in section [Service], ignoring".
@@ -64,6 +68,8 @@ def unit() -> configparser.ConfigParser:
     and configparser otherwise rejects them. ``optionxform`` is the identity so
     keys keep their CamelCase spelling, which is how systemd names them.
     """
+    # The template uses systemd specifiers (``%h``) and ``CHANGEME`` user
+    # placeholders; neither affects directive placement or values under test.
     parser = configparser.ConfigParser(strict=False, interpolation=None)
     parser.optionxform = str  # type: ignore[assignment]
     assert UNIT_PATH.exists(), f"missing unit file: {UNIT_PATH}"
@@ -137,7 +143,8 @@ def test_exec_start_points_at_the_configured_port(unit):
 def test_service_does_not_run_as_root(unit):
     """A network-facing daemon should not be root."""
     user = unit["Service"].get("User", "")
-    assert user and user != "root", f"service should declare a non-root User, got {user!r}"
+    assert user, "service should declare a User"
+    assert user != "root", f"service must not run as root, got {user!r}"
 
 
 def test_service_has_a_memory_cap(unit):
