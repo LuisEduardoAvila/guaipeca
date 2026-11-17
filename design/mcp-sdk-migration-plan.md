@@ -85,7 +85,7 @@ tool was synthetic). It was checked later on the live service: a real
 ## Phase 1 — Dependency + config + packaging · 0.5 day
 
 **PR 1.**
-- `pyproject.toml`: add `mcp>=2.3.0` to `dependencies`; keep it a *core* dep (not optional) so `guaipeca serve` always works.
+- `pyproject.toml`: add `mcp==2.3.0` to `dependencies`; keep it a *core* dep (not optional) so `guaipeca serve` always works. Pinned rather than ranged: the SSE transport reaches through `MCPServer._lowlevel_server`, a private attribute, and a silent rename would leave `/sse` serving an empty tool list rather than failing.
 - `config.py`: `ServerConfig` gains nothing new for transport. `transport: "both"` becomes `"stdio" | "http"` — **`both` cannot survive**, because the SDK runs one server per transport. Decide: keep `both` meaning "run stdio when launched as a subprocess, HTTP when launched as a daemon" (today's practical behaviour) and document it, rather than running both simultaneously.
 - Document the dropped `/sse` in `config.py` docstring and README: `transport: "sse"` is no longer valid.
 - CI (`test.yml`) unchanged; add a job step that asserts `pip install -e ".[all]"` succeeds on the runner.

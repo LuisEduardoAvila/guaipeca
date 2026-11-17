@@ -318,3 +318,60 @@ def test_run_imports_the_sdk_before_starting_any_transport():
         "run() must import the SDK before calling run_sdk_stdio/run_http_sdk, "
         "otherwise the stdio and HTTP threads import concurrently"
     )
+
+
+def test_sse_hook_rejects_a_renamed_lowlevel_server(monkeypatch):
+    """A renamed private hook must raise, not silently serve an empty toolset.
+
+    ``MCPServer`` has no ``__slots__``, so on a release that renamed the
+    attribute, ``wrapper._lowlevel_server = ours`` would *succeed*, create an
+    unused attribute, and leave ``sse_app()`` driving the SDK's own default
+    server: ``/sse`` would answer with zero tools and nothing would log an
+    error. Silent capability loss is worse than a crash.
+
+    The two ways a rename can surface are both covered here:
+    - the class rejects the old name (slotted) -> AttributeError at assignment
+    - the class accepts anything but the hook is not ours -> our RuntimeError
+
+    Either is loud. What must never happen is a working-looking ``/sse`` with
+    an empty tool list.
+    """
+    import mcp.server.mcpserver.server as mcpserver_module
+
+    from guaipeca.mcp_sdk import http as sdk_http
+
+    def _build() -> None:
+        sdk_http._build_sse_app(
+            build_server(config=None, server_instance=StubMCPServer()),
+            max_body_size=1024,
+            allowed_origins=None,
+            host="127.0.0.1",
+        )
+
+    class SlottedRename:
+        """A rename that removes the old name outright."""
+
+        __slots__ = ("_some_other_name",)
+
+        def __init__(self, _name: str) -> None:
+            self._some_other_name = None
+
+        def sse_app(self, **_kwargs):
+            raise AssertionError("sse_app() must not be reached when the hook is missing")
+
+    monkeypatch.setattr(mcpserver_module, "MCPServer", SlottedRename)
+    with pytest.raises((AttributeError, RuntimeError)):
+        _build()
+
+    class AbsorbingRename:
+        """A rename where the stale name is accepted but ignored - the silent case."""
+
+        def __init__(self, _name: str) -> None:
+            self._actual_hook = None
+
+        def sse_app(self, **_kwargs):
+            raise AssertionError("sse_app() must not be reached when the hook is missing")
+
+    monkeypatch.setattr(mcpserver_module, "MCPServer", AbsorbingRename)
+    with pytest.raises(RuntimeError, match="_lowlevel_server"):
+        _build()

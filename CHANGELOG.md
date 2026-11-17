@@ -72,6 +72,15 @@ Python SDK instead of a hand-written JSON-RPC/HTTP implementation.
 
 ### Notes
 
+- **`mcp` is pinned to `==2.3.0` in `pyproject.toml`, not given a range.** The SSE
+  transport reaches through `MCPServer._lowlevel_server`, which is private API
+  with no public equivalent (issue #25). `MCPServer` has no `__slots__`, so on a
+  release that renamed that attribute our assignment would still succeed —
+  `sse_app()` would then drive the SDK's own empty server and `/sse` would serve
+  **zero tools**, with no exception and no log line. A range would let a rebuild
+  pull such a release in. Bump the pin deliberately: change the line, run the
+  suite, and the runtime guard in `_build_sse_app` plus its tests will report a
+  moved hook immediately.
 - `both` still means "stdio when launched as a subprocess, HTTP when launched as
   a daemon" — it does not run two listeners, because the SDK runs one server per
   transport.
