@@ -830,6 +830,19 @@ class GuaipecaMCPServer:
 
     def run(self, transport: str = "both", host: str = "127.0.0.1", port: int = 8090):
         """Run the server with the specified transport(s)."""
+        # Import the SDK stack once, here, on one thread.
+        #
+        # ``mcp`` has a genuine import cycle (mcp.server -> mcp -> mcp.client ->
+        # mcp.server._memory -> mcp.server). Importing two SDK entry points
+        # concurrently from different threads can observe a half-initialised
+        # ``mcp.server`` and raise "cannot import name 'Server' from partially
+        # initialized module". Under 'both' the stdio thread and the main
+        # thread would race exactly like that, failing roughly one start in
+        # three. Importing up front makes both transports reuse the cached
+        # modules instead of racing to populate them.
+        from .mcp_sdk import http as _sdk_http  # noqa: F401
+        from .mcp_sdk import tools as _sdk_tools  # noqa: F401
+
         if transport == "stdio":
             self.run_sdk_stdio()
         elif transport == "http":

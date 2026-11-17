@@ -23,7 +23,7 @@ from mcp import types
 
 from guaipeca import __version__
 from guaipeca.mcp_sdk.tools import build_server
-from guaipeca.mcp_server import TOOLS
+from guaipeca.mcp_server import TOOLS, GuaipecaMCPServer
 
 PROJECT_ROOT = Path(__file__).parent.parent
 GOLDEN_PATH = PROJECT_ROOT / "tests" / "fixtures" / "tools_list_golden.json"
@@ -250,4 +250,41 @@ def test_all_registered_handlers_are_async_or_threaded():
         "session, not just that request). Make the handler ``async def`` and "
         "run the blocking work with ``anyio.to_thread.run_sync`` "
         "(see ``on_call_tool`` in ``guaipeca.mcp_sdk.tools``)."
+    )
+
+
+def test_run_imports_the_sdk_before_starting_any_transport():
+    """``GuaipecaMCPServer.run()`` must import the SDK stack before spawning threads.
+
+    Why this exists: on a real deployment (systemd, ``transport: both``) the
+    stdio thread and the main thread began importing different SDK entry points
+    at the same moment. ``mcp`` has a genuine import cycle
+    (mcp.server -> mcp -> mcp.client -> mcp.server._memory -> mcp.server), and
+    one thread observed a partially initialised ``mcp.server``, raising
+    "cannot import name 'Server' from partially initialized module". The
+    service failed to start.
+
+    That failure is timing-dependent and I could not reproduce it on demand
+    (0 failures in 40+ deliberate attempts, before and after the fix), so this
+    test does NOT assert the race is unreproducible. It asserts the ordering
+    that removes the race window, which is deterministic and reviewable.
+
+    If someone later moves these imports back inside the transport methods,
+    this test fails and the comment explains why that matters.
+    """
+    import inspect as _inspect
+
+    source = _inspect.getsource(GuaipecaMCPServer.run)
+    eager = source.find("mcp_sdk import")
+    first_transport = min(
+        source.find("run_sdk_stdio("),
+        source.find("run_http_sdk("),
+    )
+    assert eager != -1, (
+        "run() no longer imports the SDK eagerly; the 'both' transport will "
+        "race two concurrent imports of a circular module and can fail to start"
+    )
+    assert eager < first_transport, (
+        "run() must import the SDK before calling run_sdk_stdio/run_http_sdk, "
+        "otherwise the stdio and HTTP threads import concurrently"
     )
