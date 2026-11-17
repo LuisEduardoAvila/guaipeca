@@ -10,6 +10,14 @@ Python SDK instead of a hand-written JSON-RPC/HTTP implementation.
 
 ### Breaking
 
+- **BM25 no longer returns zero-score padding.** `bm25s` is asked for `top_k * 3` rows regardless
+  of relevance, so non-matches arrived with score `0.0` and were fused as if they were weak hits.
+  They are now dropped. Ranking of real hits is unchanged (the sparse list is already
+  rank-ordered); only padding disappears.
+- **Index lock failures no longer fail open.** The lock file is opened without truncation, and a
+  failure to open it now refuses the index run instead of proceeding unlocked. Contention keeps
+  the existing "indexing in progress" message. Platforms with no locking primitive still index
+  with a warning.
 - **The legacy SSE transport is deprecated, not removed.** `GET /sse` and
   `POST /messages` are still served, but `POST /mcp` (Streamable HTTP) is the
   preferred transport and upstream has deprecated SSE. The server says so
@@ -30,6 +38,16 @@ Python SDK instead of a hand-written JSON-RPC/HTTP implementation.
 
 ### Added
 
+- **Relevance floor for search (`max_distance`).** Dense hits below the floor are dropped, so an
+  off-topic query can return an empty result set instead of the least-bad chunk. Configurable per
+  corpus and globally, plus `--max-distance` on the CLI. Distance is `1 - cosine similarity`, so
+  lower is stricter. BM25-only hits are never filtered (they have no dense score, and exact-token
+  matches are often low-similarity and high-value). An all-filtered search is a success with
+  `results: []` and a `filtered_by_distance` count, not an error. **No default is shipped** — the
+  value depends on corpus and model; measure with `tools/eval_retrieval.py --calibrate`.
+- **Results report `distance`** (`1 - raw_score`) on dense hits, `null` for BM25-only hits.
+- **`status` reports the active relevance floor**, so an empty result can be attributed to
+  filtering rather than a failed index.
 - **Both protocol eras on one endpoint.** `POST /mcp` serves the handshake era
   (`2025-11-25` and earlier) and the stateless era (`2026-07-28`) from the same
   port, dispatching on how the client opens.

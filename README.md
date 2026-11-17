@@ -223,6 +223,32 @@ search(query="revenue", section_filter="Financial Statements")
 - `documents` — returns full source documents, deduplicated by path, with best chunk score as document score
 - `auto` — returns chunks if total result size < `search.max_chars` (default 8000), otherwise collapses to documents
 
+**max_distance** sets a relevance floor for dense hits, so an off-topic query can return an
+empty result set instead of the least-bad chunk:
+
+```python
+search(query="HFM data audit", top_k=5, corpora=["epm-docs"], max_distance=0.55)
+```
+
+Distance is `1 - cosine similarity`, so **lower is stricter**: `0.55` keeps hits whose cosine is
+at least `0.45`. It is configurable per corpus and globally (`search.max_distance`), and as
+`--max-distance` on the CLI. Omitting it preserves the previous behaviour exactly.
+
+Behaviour worth knowing:
+
+- **BM25-only hits are never filtered.** They have no dense score to judge, and hybrid exists to
+  catch exact-token matches the embedder misses — an error code or product name is often a
+  low-similarity, high-value hit. They report `"distance": null`.
+- **All hits filtered is a success, not an error**: `{"results": [], "total": 0,
+  "max_distance_applied": true, "filtered_by_distance": N}`. A partial filter reports the same
+  counter, so a shrunk result set can be told apart from a query that simply matched less.
+- **No default is shipped.** The usable value depends on corpus, embedding model, and query mix.
+  Measure it with `tools/eval_retrieval.py --calibrate`, which reports the on-topic and off-topic
+  distance distributions per corpus; pick the separation point. Corpora small enough to have no
+  distribution (single-digit chunk counts) cannot be calibrated and should be left unset.
+- `status` reports the active floor per corpus, so an empty result can be attributed to filtering
+  rather than a broken index.
+
 > **Note:** `dedup_sections` is **not** an MCP tool argument. It is an option on the internal `Searcher.search()` method (`dedup_sections=true`), available when using Guaipeca as a Python library — it collapses results sharing a `section_id`, keeping only the best-scoring chunk per section. It is not exposed over MCP, and the `search` tool does not accept it.
 
 > **Note on table formatting:** Raw chunk output (`return_mode="chunks"`) may show markdown tables with rows run-together (no blank lines between rows). This is expected — the chunker treats tables as atomic units and preserves row adjacency. For properly formatted tables, use `get_document` or `get_chunk` to retrieve the full text with original formatting.
