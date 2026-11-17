@@ -1,8 +1,14 @@
 # MCP SDK Migration — Implementation Plan
 
-**Decision:** Option B (official `mcp` SDK), legacy `/sse` transport **dropped**.
-**Issue:** #22 · **Baseline:** `main` @ `81fa0f3` (+ PR #23 pending merge)
-**Estimate:** ~8 days likely (7 with `/sse` dropped), range 4.5–16.
+**Decision:** Option B (official `mcp` SDK).
+**Issue:** #22 · **Baseline:** `main` @ `81fa0f3` · merged as `3a2b5ea`.
+
+> **Amended after delivery.** This plan says `/sse` would be **dropped**. It was
+> dropped, then restored: the SDK ships `MCPServer.sse_app()`, so keeping the
+> legacy transport costs little, and existing clients were not confirmed gone.
+> SSE is now served and marked deprecated in favour of `POST /mcp`. Phase 4's
+> "delete `/sse`" and Phase 5's "retire `/sse` tests" should be read in that
+> light; the shipped state is described in README and `CHANGELOG.md`.
 
 ---
 
@@ -48,10 +54,25 @@ Already verified from the published wheel (so this is not a blank cheque):
 3. Drive it with the SDK's own client: initialize → `tools/list` → `tools/call`. Then drive it with **curl** as a legacy 2025-11-25 client and once as a raw 2026-07-28 stateless request.
 4. Measure: RSS idle, RSS after 20 searches, cold start → first tool response, and median search latency versus today's server on the same corpus.
 
-**Exit criteria (all must hold):**
-- [ ] All deps install as wheels on aarch64, no source builds
-- [ ] Legacy initialize works through the SDK; modern stateless request works
-- [ ] `to_thread`-wrapped sync tool returns correct output under concurrent load (8 parallel calls)
+**Exit criteria — RESULTS (run 2026-11-16 on the Pi 5, aarch64, Python 3.13.5):**
+- [x] All deps install as wheels on aarch64, no source builds
+      `pip install mcp==2.3.0` -> 29 packages, zero source builds, 7.2s.
+      pydantic 2.14.3, pydantic-core 2.50.4, starlette 1.10.0, uvicorn 0.54.0,
+      anyio 4.16.0, sse-starlette 3.7.0, mcp-types 2.3.0.
+- [x] Legacy initialize works through the SDK; modern stateless request works
+      Both negotiated on one endpoint: legacy `initialize` -> 200 + session;
+      2026-07-28 stateless `tools/list` -> 200, no session.
+- [x] `to_thread`-wrapped sync tool returns correct output under concurrent load
+      8 parallel calls of a 20 ms blocking function finished in 30 ms
+      (serial would be 160 ms).
+- [x] RSS acceptable: 63 MB peak after importing the full server stack
+      (host is a 7.9 GB Pi shared with other services).
+- [x] Clean SIGTERM: `http` and `both` both exit in ~0.2 s with stdin held open,
+      which is why `os._exit(0)` could be removed.
+
+Latency versus the pre-migration server was **not** measured in the spike (the
+tool was synthetic). It was checked later on the live service: a real
+`epm-docs` search returned in ~425 ms end to end through `/mcp`.
 - [ ] Search latency within ~15% of the current server; RSS acceptable on a 7.9 GB box
 - [ ] `guaipeca serve` equivalent runs under uvicorn and shuts down cleanly on SIGTERM
 

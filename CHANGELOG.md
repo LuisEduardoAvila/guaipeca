@@ -10,17 +10,23 @@ Python SDK instead of a hand-written JSON-RPC/HTTP implementation.
 
 ### Breaking
 
-- **The legacy SSE transport is removed.** `GET /sse` and `POST /messages` now
-  return `410 Gone` with a body explaining the change. Any client on the
-  HTTP+SSE transport must move to `POST /mcp` (Streamable HTTP).
+- **The legacy SSE transport is deprecated, not removed.** `GET /sse` and
+  `POST /messages` are still served, but `POST /mcp` (Streamable HTTP) is the
+  preferred transport and upstream has deprecated SSE. The server says so
+  wherever a client can see it: `initialize` instructions, the `/tools`
+  response, and a `Deprecation: true` + `Link: </mcp>` header on the SSE
+  stream. Expect removal in a future release.
 - **`transport: "sse"` is rejected** by config validation. Valid values are
   `stdio`, `http`, and `both`.
 - **`GET /mcp` / `DELETE /mcp` behaviour is now the SDK's**, not ours. Responses
   keep their shape, but the routing decisions (405, 404 on an unknown session)
   come from the SDK's session manager.
-- **Protocol version negotiation errors are visible.** A client that requests an
-  unsupported protocol revision now gets an explicit error instead of the
-  previous silent downgrade to the server's version.
+- **Protocol version negotiation errors are visible on the modern era.** A
+  2026-07-28 request carrying an unsupported `protocolVersion` now gets JSON-RPC
+  `-32022` ("Unsupported protocol version") listing the versions the server
+  supports, instead of the previous silent downgrade. On the legacy handshake
+  the server still selects a version it supports and returns 200, which is what
+  that revision specifies.
 
 ### Added
 

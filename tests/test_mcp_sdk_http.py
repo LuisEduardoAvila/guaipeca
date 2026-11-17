@@ -651,3 +651,96 @@ def test_sse_stream_is_marked_deprecated(client):
         assert response.headers.get("deprecation") == "true", dict(response.headers)
         link = response.headers.get("link", "")
         assert "/mcp" in link, link
+
+
+# ---- 9. Protocol-version negotiation (the CHANGELOG makes these claims) ----
+
+
+def test_modern_unsupported_version_gets_32022(client):
+    """An unsupported revision on the modern era must be rejected, not downgraded.
+
+    This is the criterion from #22: a 2026-07-28 client asking for a version we
+    do not serve should learn which versions exist, so it can retry with one.
+    A silent downgrade would leave it speaking semantics neither side agrees on.
+
+    Verified against the running server before being written: status 400 with
+    `{"code": -32022, "message": "Unsupported protocol version",
+      "data": {"supported": ["2026-07-28"], "requested": "1900-01-01"}}`.
+    """
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "1900-01-01",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "t", "version": "1"},
+    }
+    response = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 7, "method": "tools/list", "params": {"_meta": meta}},
+        headers={
+            "MCP-Protocol-Version": "1900-01-01",
+            "mcp-method": "tools/list",
+            "Accept": "application/json, text/event-stream",
+        },
+    )
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["code"] == -32022, error
+    assert "1900-01-01" in json.dumps(error)
+    assert "supported" in error["data"]
+    assert MODERN_VERSION in error["data"]["supported"]
+
+
+def test_legacy_handshake_selects_a_supported_version(client):
+    """The legacy handshake is allowed to pick a version — 200, not -32022.
+
+    Pinned deliberately, because the two eras behave differently and someone
+    reading only the test above would reasonably think the old path is broken.
+    2025-11-25 and earlier revisions have the server choose from what it
+    supports; only the modern per-request envelope rejects the request outright.
+    """
+    response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "1900-01-01",
+                "capabilities": {},
+                "clientInfo": {"name": "t", "version": "1"},
+            },
+        },
+        headers={"Accept": "application/json, text/event-stream"},
+    )
+    assert response.status_code == 200, response.text
+    negotiated = response.json()["result"]["protocolVersion"]
+    assert negotiated in {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}, negotiated
+
+
+def test_server_discover_is_reachable_on_the_modern_era(client):
+    """`server/discover` is how a modern client learns versions up front.
+
+    The SDK provides it; nothing in guaipeca implemented or tested it before
+    this, which left a documented capability unverified.
+    """
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": MODERN_VERSION,
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "t", "version": "1"},
+    }
+    response = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 8, "method": "server/discover", "params": {"_meta": meta}},
+        headers={
+            "MCP-Protocol-Version": MODERN_VERSION,
+            "mcp-method": "server/discover",
+            "Accept": "application/json, text/event-stream",
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "error" not in body, body
+    result = body["result"]
+    # Wire shape is camelCase (pydantic's alias), not the snake_case attribute
+    # name the SDK model exposes. Comparing the attribute name here would look
+    # for a key the server never sends and fail for the wrong reason.
+    assert MODERN_VERSION in result.get("supportedVersions", []), result

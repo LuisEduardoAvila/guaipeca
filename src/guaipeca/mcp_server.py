@@ -96,12 +96,23 @@ def _origin_allowed(origin: str, allowed_origins: list[str] | None) -> bool:
 
 
 # MCP protocol version (latest revision this server implements)
+#
+# NOTE: these constants describe the pre-migration hand-rolled negotiation.
+# They are NOT what the serving transports use any more - the SDK owns version
+# negotiation on both `/mcp` and the SSE transport, and it knows about
+# 2026-07-28 as well. They survive because `handle_request()` still reads them
+# and is still exercised by unit tests; `_process_jsonrpc()` (their only other
+# caller) is no longer reachable from any transport.
+#
+# Do not extend this set to fix a negotiation bug: the fix belongs in the SDK.
 MCP_VERSION = "2025-11-25"
 
-# Known protocol versions for negotiation
+# Known protocol versions for negotiation (hand-rolled path only - see above)
 KNOWN_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
 
-# Minimum protocol version required for Streamable HTTP transport (/mcp)
+# Minimum protocol version for the retired hand-rolled `/mcp` handler. The
+# enforcement it refers to no longer exists: the SDK's transport decides which
+# eras it serves. Kept only because `handle_request()` still checks it.
 MIN_STREAMABLE_VERSION = "2025-03-26"
 
 # Tool definitions
