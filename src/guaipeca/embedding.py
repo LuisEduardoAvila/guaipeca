@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 import time
 from collections import OrderedDict
 
@@ -207,6 +208,15 @@ class EmbeddingService:
         self.dimensions = dimensions
         self.preprocess = preprocess
         self._model = None
+        # Guards the lazy build below. Without it, two threads that reach the
+        # property before it is populated each construct a TextEmbedding, i.e.
+        # two ONNX sessions racing on the same cache directory. Safe only while
+        # every caller is single-threaded, which stopped being a safe assumption
+        # once model loading moved off the startup path (issue #24).
+        self._model_lock = threading.Lock()
+        # A failed build is remembered so a broken model is not rebuilt on every
+        # request. Cleared only by an explicit retry.
+        self._model_error: BaseException | None = None
         self._cache = _EmbeddingCache(
             maxsize=cache_max_entries,
             ttl=cache_ttl_seconds,
@@ -245,32 +255,55 @@ class EmbeddingService:
 
     @property
     def model(self):
-        """Lazy-load the fastembed model."""
+        """Lazy-load the fastembed model, exactly once, thread-safely.
+
+        The fast path is unlocked: once ``_model`` is populated there is nothing
+        to coordinate, and embedding is the hottest call in the system.
+
+        A concurrent caller blocks on the lock while the first builds, then
+        reads the finished model — it waits rather than builds a second ONNX
+        session. A failed build is recorded and re-raised, so a broken model
+        surfaces as an error on every affected call instead of being retried
+        from scratch each time.
+        """
         if self._model is None:
-            try:
-                from fastembed import TextEmbedding
-                fastembed_name = self._normalize_model_name(self.model_name)
-                logger.info(f"Loading embedding model: {self.model_name} (fastembed: {fastembed_name})")
-                kwargs = {"model_name": fastembed_name}
-                if self.cache_dir:
-                    kwargs["cache_dir"] = self.cache_dir
-                self._model = TextEmbedding(**kwargs)
-                # Validate dimensions with a warmup embedding
-                warmup = list(self._model.embed(["warmup"]))
-                if warmup:
-                    actual_dim = warmup[0].shape[0]
-                    if actual_dim != self.dimensions:
-                        logger.warning(
-                            f"Model dimensions ({actual_dim}) != config dimensions ({self.dimensions}). "
-                            f"Using actual: {actual_dim}"
-                        )
-                        self.dimensions = actual_dim
-            except ImportError:
-                raise ImportError(
-                    "fastembed is not installed. "
-                    "Install with: pip install fastembed"
-                )
+            with self._model_lock:
+                if self._model is None:
+                    if self._model_error is not None:
+                        raise self._model_error
+                    try:
+                        self._model = self._build_model()
+                    except BaseException as exc:
+                        self._model_error = exc
+                        raise
         return self._model
+
+    def _build_model(self):
+        """Construct the fastembed model and validate its dimensions.
+
+        Split out of the ``model`` property so the property holds only the
+        locking, and so a caller can distinguish "build failed" from "lock
+        contention" when reading a traceback.
+        """
+        from fastembed import TextEmbedding
+
+        fastembed_name = self._normalize_model_name(self.model_name)
+        logger.info(f"Loading embedding model: {self.model_name} (fastembed: {fastembed_name})")
+        kwargs = {"model_name": fastembed_name}
+        if self.cache_dir:
+            kwargs["cache_dir"] = self.cache_dir
+        model = TextEmbedding(**kwargs)
+        # Validate dimensions with a warmup embedding
+        warmup = list(model.embed(["warmup"]))
+        if warmup:
+            actual_dim = warmup[0].shape[0]
+            if actual_dim != self.dimensions:
+                logger.warning(
+                    f"Model dimensions ({actual_dim}) != config dimensions ({self.dimensions}). "
+                    f"Using actual: {actual_dim}"
+                )
+                self.dimensions = actual_dim
+        return model
 
     def _cache_key(self, text: str) -> str:
         """Generate cache key: SHA256 of model_name + text."""
