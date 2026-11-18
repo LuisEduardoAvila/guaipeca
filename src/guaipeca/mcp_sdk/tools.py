@@ -26,7 +26,6 @@ from mcp.server.lowlevel import Server
 from guaipeca import __version__
 
 if TYPE_CHECKING:
-    from guaipeca.config import GuaipecaConfig
     from guaipeca.mcp_server import GuaipecaMCPServer
 
 __all__ = ["build_server", "run_stdio"]
@@ -77,7 +76,7 @@ def _result_to_call_tool_result(result: Any) -> types.CallToolResult:
     return types.CallToolResult(content=content, isError=bool(result.get("isError", False)))
 
 
-def build_server(config: GuaipecaConfig, server_instance: GuaipecaMCPServer) -> Server:
+def build_server(server_instance: GuaipecaMCPServer) -> Server:
     """Build an SDK ``Server`` whose tools are Guaipeca's existing registry."""
 
     async def on_list_tools(_ctx: Any, _params: Any) -> types.ListToolsResult:
@@ -116,10 +115,10 @@ def build_server(config: GuaipecaConfig, server_instance: GuaipecaMCPServer) -> 
     )
 
 
-async def run_stdio(config: GuaipecaConfig, server_instance: GuaipecaMCPServer) -> None:
+async def run_stdio(server_instance: GuaipecaMCPServer) -> None:
     """Serve ``server_instance`` over the SDK's stdio transport until EOF."""
     from mcp.server.stdio import stdio_server
 
-    server = build_server(config, server_instance)
+    server = build_server(server_instance)
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())

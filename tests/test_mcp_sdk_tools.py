@@ -92,7 +92,7 @@ def _call_tool(server: Any, name: str, arguments: dict | None = None) -> Any:
 
 def test_sdk_tool_list_matches_golden():
     """The SDK's tools/list must be identical to today's server output."""
-    server = build_server(config=None, server_instance=StubMCPServer())
+    server = build_server(server_instance=StubMCPServer())
     actual = _list_tools_payload(server)
 
     golden = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
@@ -125,7 +125,7 @@ def test_sdk_tool_list_matches_golden():
 
 
 def test_sdk_server_metadata():
-    server = build_server(config=None, server_instance=StubMCPServer())
+    server = build_server(server_instance=StubMCPServer())
     assert server.name == "guaipeca"
     assert server.version == __version__
 
@@ -137,7 +137,7 @@ def test_call_tool_bridges_result_text():
     stub = StubMCPServer(
         call_result={"content": [{"type": "text", "text": '{"results": ["a"]}'}]}
     )
-    server = build_server(config=None, server_instance=stub)
+    server = build_server(server_instance=stub)
 
     result = _call_tool(server, "search", {"query": "rag"})
 
@@ -152,7 +152,7 @@ def test_call_tool_bridges_result_text():
 
 def test_call_tool_unexpected_return_is_tool_error():
     stub = StubMCPServer(call_result="not a dict")
-    server = build_server(config=None, server_instance=stub)
+    server = build_server(server_instance=stub)
 
     result = _call_tool(server, "search", {"query": "rag"})
 
@@ -170,7 +170,7 @@ def test_call_tool_does_not_block_event_loop():
         call_result={"content": [{"type": "text", "text": "ok"}]},
         call_delay=0.5,
     )
-    server = build_server(config=None, server_instance=stub)
+    server = build_server(server_instance=stub)
     handler = _get_handler(server, "tools/call")
 
     async def scenario() -> tuple[str, str]:
@@ -200,7 +200,7 @@ def test_call_tool_preserves_is_error():
     stub = StubMCPServer(
         call_result={"content": [{"type": "text", "text": "Chunk not found: xyz"}], "isError": True}
     )
-    server = build_server(config=None, server_instance=stub)
+    server = build_server(server_instance=stub)
 
     result = _call_tool(server, "get_chunk", {"chunk_id": "xyz"})
 
@@ -227,7 +227,7 @@ def test_all_registered_handlers_are_async_or_threaded():
     fails the moment someone registers a ``def`` instead, before it reaches a
     live session.
     """
-    server = build_server(config=None, server_instance=StubMCPServer())
+    server = build_server(server_instance=StubMCPServer())
 
     handlers = getattr(server, "_request_handlers", None)
     assert handlers, (
@@ -342,7 +342,7 @@ def test_sse_hook_rejects_a_renamed_lowlevel_server(monkeypatch):
 
     def _build() -> None:
         sdk_http._build_sse_app(
-            build_server(config=None, server_instance=StubMCPServer()),
+            build_server(server_instance=StubMCPServer()),
             max_body_size=1024,
             allowed_origins=None,
             host="127.0.0.1",

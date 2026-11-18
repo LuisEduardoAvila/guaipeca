@@ -176,7 +176,7 @@ class _HmacTokenVerifier:
 
     The SDK's OAuth-shaped ``AuthSettings`` is not what this server has; the
     protocol is one method and the whole check is a constant-time compare, the
-    same comparison ``run_http``'s ``_check_auth`` performed.
+    same constant-time comparison against the single shared token.
     """
 
     def __init__(self, expected_token: str) -> None:
@@ -197,7 +197,7 @@ def _unauthorized() -> JSONResponse:
 
 
 def _check_bearer(request: Any, auth_token: str | None) -> bool:
-    """Same check as ``run_http``'s ``_check_auth`` for the non-MCP routes.
+    """Bearer check for the non-MCP routes (``/health``, ``/tools``, ...).
 
     The SDK guards ``/mcp`` itself through the token verifier; these routes
     bypass that wrapper, so they repeat the constant-time comparison.
@@ -208,18 +208,6 @@ def _check_bearer(request: Any, auth_token: str | None) -> bool:
     if not header.startswith("Bearer "):
         return False
     return hmac.compare_digest(header[7:], auth_token)
-
-
-def _cors_origin(request: Any, auth_token: str | None, allowed_origins: list[str] | None) -> str:
-    """Access-Control-Allow-Origin value, matching ``_cors_value``.
-
-    Echo a validated request Origin; otherwise keep the legacy value
-    ('*' without auth, 'null' with auth).
-    """
-    origin = request.headers.get("origin", "").strip()
-    if origin and _origin_allowed(origin, allowed_origins):
-        return origin
-    return "*" if not auth_token else "null"
 
 
 class _CorsMiddleware:
@@ -269,11 +257,13 @@ class _CorsMiddleware:
 
 
 def _server_config(config: GuaipecaConfig) -> Any:
-    """``config.server`` if it looks usable, else None.
+    """``config.server`` if present, else None.
 
-    ``server_instance.config`` may be duck-typed in tests; anything without a
-    ``server`` section is treated as "no server settings" and the documented
-    defaults apply.
+    No validation happens here: a duck-typed test config with a partial
+    ``server`` section is returned as-is, and each caller applies its own
+    default for a missing attribute (``auth_token``, ``max_body_size``, ...).
+    An object without a ``server`` section means "no server settings", so the
+    documented defaults apply.
     """
     return getattr(config, "server", None)
 
@@ -537,7 +527,7 @@ def build_app(
             + "=" * 60
         )
 
-    srv = build_server(config, server_instance)
+    srv = build_server(server_instance)
 
     custom_routes = [
         Route("/health", _health(server_instance), methods=["GET"]),
@@ -633,7 +623,7 @@ def _probe_bind(host: str, port: int) -> None:
 
 
 def _pick_port(host: str, port: int) -> int:
-    """First free port at ``port`` or the four above it (``run_http`` parity)."""
+    """First free port at ``port`` or the four above it."""
     actual_port = port
     for _ in range(_PORT_ATTEMPTS):
         try:
@@ -656,7 +646,7 @@ def serve(
 ) -> None:
     """Run :func:`build_app` under uvicorn until SIGTERM/SIGINT.
 
-    Port-retry replaces ``run_http``'s loop; uvicorn's own bind failure calls
+    Port-retry replaces the old hand-rolled loop; uvicorn's own bind failure calls
     ``sys.exit(3)``, which a retry cannot intercept, so the port is chosen
     before uvicorn starts. Shutdown is uvicorn's graceful path; see the module
     docstring and the migration plan for the native-thread caveat.
