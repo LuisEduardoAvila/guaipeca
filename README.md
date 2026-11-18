@@ -38,29 +38,75 @@ Proven on a Raspberry Pi 5 (8GB RAM, ARM64) alongside other services. If it runs
 
 ## Quick Start
 
+**Which one?** Docker for a fresh box, a VM, or anything you want to reach from another
+machine; the venv install for an existing single host — a laptop, or a Pi already running
+other services.
+
+### Quick Start (venv)
+
 ```bash
-# Clone and install
 git clone https://github.com/LuisEduardoAvila/guaipeca.git
 cd guaipeca
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e ".[all]"
-# pymupdf is included as a core dependency for PDF heading detection
 
-# Create config
+mkdir -p ~/.guaipeca
 cp config/guaipeca.yaml ~/.guaipeca/guaipeca.yaml
-# Edit config to point to your document folders
-
-# Check/download embedding model
-guaipeca --check-model
-
-# Index your corpora
-guaipeca index
-
-# Search from CLI
-guaipeca search "HFM data audit"
-
-# Start MCP server (stdio + HTTP on port 8090)
-guaipeca serve
 ```
+
+Then edit `~/.guaipeca/guaipeca.yaml` and point the one corpus it defines at a folder that
+exists on this machine:
+
+```yaml
+# change this
+- name: docs
+  path: /path/to/your/docs
+
+# to this (any folder you already have notes in)
+- name: notes
+  path: /home/you/projects/my-notes
+```
+
+The sample ships a single corpus on purpose. Add more by copying that block — each needs its
+own folder, and `guaipeca index` exits 1 naming any corpus whose folder does not exist. While
+the config is still byte-identical to the bundled sample, `guaipeca index` refuses with exit 2.
+
+```bash
+guaipeca --check-model      # downloads the embedding model (~90MB, CPU only)
+guaipeca index
+guaipeca search "something you know is in your documents"
+guaipeca serve              # MCP server on port 8090
+```
+
+**PEP 668:** a bare `pip install` fails on Debian 12+ and Ubuntu 23.04+ with
+`externally-managed-environment` — that is why the venv step exists.
+
+### Quick Start (Docker)
+
+```bash
+# 1. Prepare data directory (run from the cloned repo: docker-compose.yml lives there)
+mkdir -p data/{config,corpora,index,models}
+cp config/guaipeca.container.yaml data/config/guaipeca.yaml
+# Optionally add a server.auth_token to data/config/guaipeca.yaml first
+
+# 2. Put your documents in data/corpora/<corpus-name>/
+#    The container config defines one corpus named epm-docs, so:
+#    data/corpora/epm-docs/yourfile.pdf
+#    NOT directly in data/corpora/ - files one level up match no corpus.
+
+# 3. Start the container
+docker compose up -d
+
+# 4. Check health
+curl http://localhost:8090/health
+
+# 5. Index corpora (first time)
+docker compose exec guaipeca guaipeca --config /data/config/guaipeca.yaml index
+```
+
+If you rename or add a corpus in `data/config/guaipeca.yaml`, create the matching
+`data/corpora/<name>/` directory first.
 
 ## Configuration
 
@@ -354,36 +400,20 @@ For always-on deployment on any Linux system (Pi 5, VM, laptop, server), install
 
 ### 1. Create the service file
 
+`guaipeca.service` is gitignored and absent from a fresh clone, so the tracked template is
+the source: it carries the `CHANGEME` user placeholder and `%h`-relative paths, which is why
+the real unit is not tracked.
+
 ```bash
-# Copy the service file (or create manually — see below)
-sudo cp guaipeca.service /etc/systemd/system/guaipeca.service
+sed -e 's|CHANGEME|'"$USER"'|g' guaipeca.service.template > /tmp/guaipeca.service
+sudo cp /tmp/guaipeca.service /etc/systemd/system/guaipeca.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now guaipeca
 ```
 
-Or create it manually at `/etc/systemd/system/guaipeca.service`:
-
-```ini
-[Unit]
-Description=Guaipeca RAG MCP Server
-After=network.target
-
-[Service]
-Type=simple
-User=<your-user>
-Group=<your-group>
-WorkingDirectory=/path/to/guaipeca
-ExecStart=/path/to/guaipeca --config /home/<user>/.guaipeca/guaipeca.yaml serve --transport both --port 8090
-Restart=on-failure
-RestartSec=10
-Environment=PYTHONUNBUFFERED=1
-Environment=HOME=/home/<user>
-
-# Optional resource limits (prevent starving other services)
-MemoryMax=1G
-CPUQuota=200%
-
-[Install]
-WantedBy=multi-user.target
-```
+The template's `ExecStart` assumes `~/.local/bin/guaipeca`, where a `pipx install` or
+`pip install --user` puts the executable — not the repo's `.venv/bin/` from Quick Start.
+Install with pipx (recommended for a daemon), or edit that line to the venv path.
 
 ### 2. Enable and start
 
@@ -393,12 +423,15 @@ sudo systemctl enable guaipeca   # start on boot
 sudo systemctl start guaipeca    # start now
 ```
 
+This is a no-op if you already ran `enable --now` in step 1; it is the equivalent when you
+edited the unit or copied it in by hand.
+
 ### 3. Verify
 
 ```bash
 systemctl status guaipeca
 curl http://127.0.0.1:8090/health
-# → {"status": "ok", "server": "guaipeca", "version": "0.4.0"}
+# → {"status": "ok", "server": "guaipeca", "version": "0.5.0"}
 ```
 
 ### 4. Check logs
@@ -418,7 +451,8 @@ sudo systemctl disable guaipeca    # stop starting on boot
 
 ### Notes
 
-- The service runs `guaipeca serve` with `--transport both` (stdio + HTTP/SSE)
+- The service runs `guaipeca serve` with `--transport http` — stdio is not usable under
+  systemd, where the unit has no stdin
 - Port 8090 is bound to `127.0.0.1` by default (config `server.host`). Use `0.0.0.0` for network access
 - Resource limits (`MemoryMax`, `CPUQuota`) prevent Guaipeca from starving other services on shared or low-resource hosts
 - The embedding model loads at startup (~1s with fastembed/ONNX). First search/index may take slightly longer if the model needs to download
@@ -509,26 +543,7 @@ sudo apt install build-essential python3-dev
 
 ## Container Deployment (Docker)
 
-Guaipeca ships with a Docker container for easy deployment on any platform (ARM64 or x86_64). Run it on a VM, a cloud instance, or alongside other containers — the image is multi-arch and ~643MB before model download.
-
-### Quick Start
-
-```bash
-# 1. Prepare data directory
-mkdir -p data/{config,corpora,index,models}
-cp config/guaipeca.container.yaml data/config/guaipeca.yaml
-# Edit data/config/guaipeca.yaml as needed
-# Copy your documents to data/corpora/
-
-# 2. Start the container
-docker compose up -d
-
-# 3. Check health
-curl http://localhost:8090/health
-
-# 4. Index corpora (first time)
-docker compose exec guaipeca guaipeca --config /data/config/guaipeca.yaml index
-```
+Guaipeca ships with a Docker container for easy deployment on any platform (ARM64 or x86_64). Run it on a VM, a cloud instance, or alongside other containers — the image is multi-arch and ~643MB before model download. The commands are in [Quick Start (Docker)](#quick-start-docker); this section covers the deployment details around them.
 
 ### Building from Source
 
@@ -557,14 +572,15 @@ data/              → /data (mounted volume)
 
 The embedding model (~90MB) downloads to the volume on first run. Subsequent starts load from cache — no network needed.
 
+Documents live in `data/corpora/<corpus-name>/`, one directory per corpus name defined in
+`data/config/guaipeca.yaml` — never directly in `data/corpora/`, which belongs to no corpus.
+
 ### Automated Rebuilds
 
 Push to `main` triggers a GitHub Actions workflow that:
 - Builds multi-arch images (arm64 + amd64)
 - Tags with `latest` and commit SHA
 - Pushes to `ghcr.io/luis-eduardo-avila/guaipeca`
-
-See `docs/container-deployment.md` for detailed VM deployment instructions.
 
 ## Security
 

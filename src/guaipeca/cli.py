@@ -277,7 +277,15 @@ def _warn_if_nothing_matched(stats: dict) -> None:
     extension filter matched nothing - the folder exists but the files in it
     are not ones this corpus is configured to read. Exit stays 0: nothing is
     broken, but the user must not be told a corpus is indexed when it is empty.
+
+    Errors take precedence. A run where every file failed to convert also
+    reports 0 indexed and 0 skipped, and calling that "0 files matched" blames
+    the extension filter for what is actually a broken dependency or an
+    unreadable file. The per-file errors are already printed by the caller;
+    this stays quiet so the message does not contradict them.
     """
+    if stats.get("errors"):
+        return
     if stats["files_indexed"] == 0 and stats["files_skipped"] == 0:
         print(
             f"Warning: corpus '{stats['corpus']}': 0 files matched - nothing indexed",

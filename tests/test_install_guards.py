@@ -399,3 +399,30 @@ def test_warning_is_per_corpus_not_per_run(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "'b'" in err
     assert "'a'" not in err
+
+
+def test_conversion_errors_do_not_report_as_no_files_matched(tmp_path, monkeypatch, capsys):
+    """A run where every file errored must not be blamed on the extension filter.
+
+    Both cases report files_indexed == 0 and files_skipped == 0, so without
+    checking `errors` first the CLI prints "0 files matched", which sends the
+    reader to look at their `extensions:` list while the real cause — a missing
+    dependency, an unreadable file — scrolls past above it.
+    """
+    config_path = _write_config(tmp_path, [{"name": "docs", "path": str(tmp_path)}])
+    stats = {
+        "corpus": "docs",
+        "files_indexed": 0,
+        "chunks_created": 0,
+        "files_skipped": 0,
+        "duration_ms": 1,
+        "errors": [{"file": "note.md", "error": "No module named 'fastembed'"}],
+    }
+    _stub_searcher(monkeypatch, {"corpora": [stats]})
+
+    cmd_index(_args(config=str(config_path)))  # must not raise
+
+    err = capsys.readouterr().err
+    assert "0 files matched" not in err, (
+        "a conversion failure must not be reported as an extension-filter miss"
+    )
