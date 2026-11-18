@@ -3,26 +3,18 @@
 # Place at: ~/.guaipeca/guaipeca.yaml or specify with --config
 
 corpora:
-  # Define your document corpora here
-  # Each corpus is a folder with its own weight and topic label
-  
-  - name: epm-docs
+  # One corpus to start with: change `path` to a folder that exists on this
+  # machine and you are done. The CLI refuses to index while this file is the
+  # unmodified sample, so an edit is required, not optional.
+  #
+  # Add more corpora by copying this block. Each needs its own folder; a corpus
+  # whose folder does not exist makes `guaipeca index` exit 1 and name it, which
+  # is why the sample ships one rather than three placeholders nobody filled in.
+  - name: docs
     path: /path/to/your/docs
-    topic: "EPM & Oracle HFM/ARCS"
-    weight: 1.5
-    extensions: [.md, .txt, .pdf, .docx]
-  
-  - name: finance-reference
-    path: /path/to/your/finance-docs
-    topic: "Finance & Accounting Standards"
-    weight: 1.3
-    extensions: [.md, .txt, .pdf]
-  
-  - name: general-notes
-    path: /path/to/your/notes
-    topic: "General Notes & Decisions"
+    topic: "My documents"
     weight: 1.0
-    extensions: [.md, .txt]
+    extensions: [.md, .txt, .pdf, .docx]
 
 # Embedding configuration
 # FastEmbed (ONNX Runtime) — no torch dependency, CPU-only

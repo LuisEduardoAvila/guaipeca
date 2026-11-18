@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -34,6 +35,55 @@ DEFAULT_CONFIG_PATHS = [
     "./guaipeca.yaml",
     "./config/guaipeca.yaml",
 ]
+
+
+# The bundled sample ships with placeholder corpus paths (/path/to/your/docs).
+# A user who copies it but does not edit it gets an index run that can only ever
+# produce nothing. Detected by comparing file CONTENT against the bundled copy,
+# not by which DEFAULT_CONFIG_PATHS entry matched: a path check would also fire
+# for a user who deliberately keeps ./guaipeca.yaml, and would MISS a user who
+# copied the sample to ~/.guaipeca/ and never edited it - the actual reported case.
+def _is_unedited_sample(path: str) -> bool:
+    """True if *path* is byte-identical to the bundled sample config.
+
+    This is the *accidental fallback* case: no config at ``~/.guaipeca/`` and no
+    ``./guaipeca.yaml``, so ``_find_config`` landed on the sample shipped in
+    ``config/``. Its corpora point at ``/path/to/your/...``, so an index run
+    against it can only ever produce nothing.
+
+    A user who *passes* the sample explicitly with ``--config`` knows what they
+    are doing and is not warned about — the caller decides that, by only asking
+    this function when it did not receive an explicit path.
+
+    Returns False whenever the comparison target cannot be found (pip-installed
+    package without config/, unusual layouts): a missing reference must never
+    turn into a crash on every command.
+    """
+    try:
+        sample = Path(__file__).resolve().parents[2] / "config" / "guaipeca.yaml"
+        with open(path, "rb") as f:
+            actual = f.read()
+        with open(sample, "rb") as f:
+            reference = f.read()
+        return actual == reference
+    except (OSError, ValueError):
+        return False
+
+
+def _find_missing_corpora(config: GuaipecaConfig, names: list[str]) -> list:
+    """Corpus configs (from *names*) whose configured path is not a directory.
+
+    Checked before any indexing work so a typo in the config is reported as a
+    configuration error naming the fix, rather than as an index that "produced
+    0 files" - which looks like an empty folder and not like a mistake.
+    """
+    missing = []
+    for name in names:
+        corpus = config.get_corpus(name)
+        if corpus is not None and not os.path.isdir(corpus.path):
+            missing.append(corpus)
+    return missing
+
 
 # ---- CLI/MCP parity registry ------------------------------------------------
 # Maps every MCP tool name to its CLI subcommand. ``tests/test_cli_mcp_parity.py``
@@ -69,8 +119,6 @@ SEARCH_PROP_TO_CLI_DEST = {
 
 def _find_config(explicit: str | None = None) -> str:
     """Find the config file to use."""
-    import os
-
     if explicit:
         path = os.path.expanduser(explicit)
         if not os.path.isfile(path):
@@ -91,6 +139,25 @@ def _load_config(explicit: str | None = None) -> GuaipecaConfig:
     """Load config and print warnings."""
     path = _find_config(explicit)
     config = GuaipecaConfig.from_yaml(path)
+    # The verdict travels on the config object because cmd_index needs to
+    # escalate this warning to a refusal, and main() never sees the resolved
+    # path. from_yaml() cannot know it: only the caller knows which file won.
+    #
+    # Only "we fell through to the bundled sample" counts. An explicit --config
+    # pointing at the same file is a deliberate choice, not the mishap that
+    # issue #30 describes, so it is excluded here rather than inside the helper
+    # (which cannot tell the two apart once it has only a path).
+    config._is_sample_config = explicit is None and _is_unedited_sample(path)
+    if config._is_sample_config:
+        # Point at the file the user is *supposed* to create, not at the bundled
+        # sample they accidentally landed on: telling them to edit the repo's own
+        # config/ sample is advice that silently does nothing after the next
+        # `git pull`.
+        print(
+            "Warning: using the bundled sample config - corpus paths are "
+            "placeholders. Copy it to ~/.guaipeca/guaipeca.yaml and set real paths.",
+            file=sys.stderr,
+        )
     warnings = config.validate()
     for w in warnings:
         print(f"Warning: {w}", file=sys.stderr)
@@ -134,12 +201,54 @@ def _emit(result: dict) -> None:
     _print_json(result)
 
 
+def _print_index_stats(stats: dict) -> None:
+    """Print one corpus's index stats (per-corpus dict shape)."""
+    print(f"\n[{stats['corpus']}]")
+    print(f"  Files indexed: {stats['files_indexed']}")
+    print(f"  Chunks created: {stats['chunks_created']}")
+    print(f"  Files skipped: {stats['files_skipped']}")
+    print(f"  Duration: {stats['duration_ms']}ms")
+    if stats["errors"]:
+        print(f"  Errors: {len(stats['errors'])}")
+        for err in stats["errors"]:
+            print(f"    - {err['file']}: {err['error']}")
+
+
 def cmd_index(args):
     """Index corpora."""
     config = _load_config(args.config)
-    _, _, searcher = _create_services(config)
+    config_path = _find_config(args.config)
+
+    # exit 2, not 1: 1 already means "an index run returned an error result".
+    # A distinct code lets a script tell "misconfigured" from "index failed".
+    if getattr(config, "_is_sample_config", False):
+        print(
+            "Error: refusing to index with the unmodified sample config - corpus paths "
+            "are placeholders (/path/to/your/docs). Edit the config to point at your real "
+            "folders, then retry.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     corpus = args.corpus or "all"
+    if corpus == "all":
+        requested = [c.name for c in config.corpora]
+    else:
+        requested = [corpus]
+
+    # A nonexistent path also reports files_indexed == 0, so it has to be ruled
+    # out BEFORE "0 files" is interpreted: otherwise a typo is reported as an
+    # empty folder with exit 0, which is exactly the silent failure of issue #30.
+    # Every missing path is collected first: one bad entry should not hide the
+    # rest while the user is already editing the file.
+    missing = _find_missing_corpora(config, requested)
+    if missing:
+        for c in missing:
+            print(f"Error: corpus '{c.name}': path does not exist: {c.path}", file=sys.stderr)
+        print(f"Fix: edit paths in {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    _, _, searcher = _create_services(config)
     result = searcher.index_corpus(corpus_name=corpus, force=args.force)
 
     if "error" in result:
@@ -153,25 +262,35 @@ def cmd_index(args):
             if stats.get("error"):
                 print(f"Error: {stats['error']}", file=sys.stderr)
                 continue
-            print(f"\n[{stats['corpus']}]")
-            print(f"  Files indexed: {stats['files_indexed']}")
-            print(f"  Chunks created: {stats['chunks_created']}")
-            print(f"  Files skipped: {stats['files_skipped']}")
-            print(f"  Duration: {stats['duration_ms']}ms")
-            if stats["errors"]:
-                print(f"  Errors: {len(stats['errors'])}")
-                for err in stats["errors"]:
-                    print(f"    - {err['file']}: {err['error']}")
+            _print_index_stats(stats)
+            _warn_if_nothing_matched(stats)
     else:
-        print(f"\n[{result['corpus']}]")
-        print(f"  Files indexed: {result['files_indexed']}")
-        print(f"  Chunks created: {result['chunks_created']}")
-        print(f"  Files skipped: {result['files_skipped']}")
-        print(f"  Duration: {result['duration_ms']}ms")
-        if result["errors"]:
-            print(f"  Errors: {len(result['errors'])}")
-            for err in result["errors"]:
-                print(f"    - {err['file']}: {err['error']}")
+        _print_index_stats(result)
+        _warn_if_nothing_matched(result)
+
+
+def _warn_if_nothing_matched(stats: dict) -> None:
+    """Warn when an existing corpus produced no work at all.
+
+    files_skipped > 0 is an incremental re-index with nothing changed: a
+    success, and deliberately silent. Only 0 indexed AND 0 skipped means the
+    extension filter matched nothing - the folder exists but the files in it
+    are not ones this corpus is configured to read. Exit stays 0: nothing is
+    broken, but the user must not be told a corpus is indexed when it is empty.
+
+    Errors take precedence. A run where every file failed to convert also
+    reports 0 indexed and 0 skipped, and calling that "0 files matched" blames
+    the extension filter for what is actually a broken dependency or an
+    unreadable file. The per-file errors are already printed by the caller;
+    this stays quiet so the message does not contradict them.
+    """
+    if stats.get("errors"):
+        return
+    if stats["files_indexed"] == 0 and stats["files_skipped"] == 0:
+        print(
+            f"Warning: corpus '{stats['corpus']}': 0 files matched - nothing indexed",
+            file=sys.stderr,
+        )
 
 
 def cmd_search(args):
@@ -251,9 +370,13 @@ def cmd_search(args):
 
 def cmd_status(args):
     """Show corpus status."""
-    config = _load_config(args.config)
+    # Imported from the module rather than inside the function so tests can
+    # replace them wholesale (tests/test_install_guards.py pins the read-side
+    # warning this way without loading a model).
     from .embedding import EmbeddingService
     from .search import Searcher
+
+    config = _load_config(args.config)
 
     embedder = EmbeddingService(
         model_name=config.embedding.model,

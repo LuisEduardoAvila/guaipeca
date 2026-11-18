@@ -13,7 +13,7 @@
 #
 [Unit]
 Description=Guaipeca RAG MCP Server
-Documentation=https://github.com/smartspud/guaipeca
+Documentation=https://github.com/LuisEduardoAvila/guaipeca
 After=network.target
 # Start rate limiting belongs to [Unit]; systemd ignores both keys in
 # [Service]. Three restarts inside 60s trip the limit and leave the unit
