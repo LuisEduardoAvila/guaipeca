@@ -174,9 +174,10 @@ def _security_settings(
 class _HmacTokenVerifier:
     """``TokenVerifier`` protocol for a single shared Bearer secret.
 
-    The SDK's OAuth-shaped ``AuthSettings`` is not what this server has; the
-    protocol is one method and the whole check is a constant-time compare, the
-    same comparison ``run_http``'s ``_check_auth`` performed.
+    The SDK's OAuth-shaped ``AuthSettings`` is not what this server has: the
+    protocol is one method, and ``verify_token`` compares the presented Bearer
+    token against the single shared secret with ``hmac.compare_digest``. There
+    is no issuer, no audience and no scope list to consult.
     """
 
     def __init__(self, expected_token: str) -> None:
@@ -197,7 +198,7 @@ def _unauthorized() -> JSONResponse:
 
 
 def _check_bearer(request: Any, auth_token: str | None) -> bool:
-    """Same check as ``run_http``'s ``_check_auth`` for the non-MCP routes.
+    """Bearer check for the non-MCP routes (``/health``, ``/tools``, ...).
 
     The SDK guards ``/mcp`` itself through the token verifier; these routes
     bypass that wrapper, so they repeat the constant-time comparison.
@@ -210,25 +211,18 @@ def _check_bearer(request: Any, auth_token: str | None) -> bool:
     return hmac.compare_digest(header[7:], auth_token)
 
 
-def _cors_origin(request: Any, auth_token: str | None, allowed_origins: list[str] | None) -> str:
-    """Access-Control-Allow-Origin value, matching ``_cors_value``.
-
-    Echo a validated request Origin; otherwise keep the legacy value
-    ('*' without auth, 'null' with auth).
-    """
-    origin = request.headers.get("origin", "").strip()
-    if origin and _origin_allowed(origin, allowed_origins):
-        return origin
-    return "*" if not auth_token else "null"
-
-
 class _CorsMiddleware:
     """Add ``Access-Control-Allow-Origin`` and answer CORS preflights.
 
     The SDK validates the Origin header (DNS-rebinding protection) but does not
     emit CORS response headers, so without this a browser client passes the
-    origin check and then has its response withheld. Pre-PR-23 behaviour:
-    echo a validated Origin, else '*' without auth and 'null' with.
+    origin check and then has its response withheld.
+
+    Origin policy: a non-empty Origin that fails ``_origin_allowed`` is answered
+    with 403 here, before any route runs. A request with no Origin gets ``*``
+    when no auth token is configured and ``null`` when one is; a validated
+    Origin is echoed back. Preflights (``OPTIONS``) are NOT answered - see
+    issue #36.
     """
 
     def __init__(self, app: Any, auth_token: str | None, allowed_origins: list[str] | None) -> None:
@@ -269,11 +263,13 @@ class _CorsMiddleware:
 
 
 def _server_config(config: GuaipecaConfig) -> Any:
-    """``config.server`` if it looks usable, else None.
+    """``config.server`` if present, else None.
 
-    ``server_instance.config`` may be duck-typed in tests; anything without a
-    ``server`` section is treated as "no server settings" and the documented
-    defaults apply.
+    No validation happens here: a duck-typed test config with a partial
+    ``server`` section is returned as-is, and each caller applies its own
+    default for a missing attribute (``auth_token``, ``max_body_size``, ...).
+    An object without a ``server`` section means "no server settings", so the
+    documented defaults apply.
     """
     return getattr(config, "server", None)
 
@@ -537,7 +533,7 @@ def build_app(
             + "=" * 60
         )
 
-    srv = build_server(config, server_instance)
+    srv = build_server(server_instance)
 
     custom_routes = [
         Route("/health", _health(server_instance), methods=["GET"]),
@@ -633,7 +629,7 @@ def _probe_bind(host: str, port: int) -> None:
 
 
 def _pick_port(host: str, port: int) -> int:
-    """First free port at ``port`` or the four above it (``run_http`` parity)."""
+    """First free port at ``port`` or the four above it."""
     actual_port = port
     for _ in range(_PORT_ATTEMPTS):
         try:
@@ -656,7 +652,7 @@ def serve(
 ) -> None:
     """Run :func:`build_app` under uvicorn until SIGTERM/SIGINT.
 
-    Port-retry replaces ``run_http``'s loop; uvicorn's own bind failure calls
+    Port-retry replaces the old hand-rolled loop; uvicorn's own bind failure calls
     ``sys.exit(3)``, which a retry cannot intercept, so the port is chosen
     before uvicorn starts. Shutdown is uvicorn's graceful path; see the module
     docstring and the migration plan for the native-thread caveat.

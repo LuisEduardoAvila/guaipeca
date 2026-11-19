@@ -838,7 +838,7 @@ class GuaipecaMCPServer:
         from .mcp_sdk.tools import run_stdio as _run_sdk_stdio
 
         logger.info("Starting Guaipeca MCP server (stdio, mcp SDK)")
-        asyncio.run(_run_sdk_stdio(self.config, self))
+        asyncio.run(_run_sdk_stdio(self))
 
     def run_http_sdk(self, host: str = "127.0.0.1", port: int = 8090):
         """Run the HTTP transport through the official SDK.
