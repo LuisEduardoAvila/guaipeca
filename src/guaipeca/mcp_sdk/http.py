@@ -174,9 +174,10 @@ def _security_settings(
 class _HmacTokenVerifier:
     """``TokenVerifier`` protocol for a single shared Bearer secret.
 
-    The SDK's OAuth-shaped ``AuthSettings`` is not what this server has; the
-    protocol is one method and the whole check is a constant-time compare, the
-    same constant-time comparison against the single shared token.
+    The SDK's OAuth-shaped ``AuthSettings`` is not what this server has: the
+    protocol is one method, and ``verify_token`` compares the presented Bearer
+    token against the single shared secret with ``hmac.compare_digest``. There
+    is no issuer, no audience and no scope list to consult.
     """
 
     def __init__(self, expected_token: str) -> None:
@@ -215,8 +216,13 @@ class _CorsMiddleware:
 
     The SDK validates the Origin header (DNS-rebinding protection) but does not
     emit CORS response headers, so without this a browser client passes the
-    origin check and then has its response withheld. Pre-PR-23 behaviour:
-    echo a validated Origin, else '*' without auth and 'null' with.
+    origin check and then has its response withheld.
+
+    Origin policy: a non-empty Origin that fails ``_origin_allowed`` is answered
+    with 403 here, before any route runs. A request with no Origin gets ``*``
+    when no auth token is configured and ``null`` when one is; a validated
+    Origin is echoed back. Preflights (``OPTIONS``) are NOT answered - see
+    issue #36.
     """
 
     def __init__(self, app: Any, auth_token: str | None, allowed_origins: list[str] | None) -> None:
