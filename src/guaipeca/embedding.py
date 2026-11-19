@@ -17,8 +17,10 @@ import logging
 import threading
 import time
 from collections import OrderedDict
+from typing import TYPE_CHECKING
 
-import numpy as np
+if TYPE_CHECKING:  # issue #32: annotation-only, must not cost an import
+    import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -323,6 +325,10 @@ class EmbeddingService:
             numpy array of shape (len(texts), dimensions), L2-normalized for
             cosine similarity via inner product.
         """
+        # Deferred: numpy costs ~830ms to import on the Pi 5, and every CLI
+        # command reaches this module. Only an actual embed needs it (#32).
+        import numpy as np
+
         if not texts:
             return np.array([], dtype=np.float32).reshape(0, self.dimensions)
 

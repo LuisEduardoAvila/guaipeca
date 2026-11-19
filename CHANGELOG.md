@@ -3,6 +3,17 @@
 Notable changes to Guaipeca. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are semver.
 
+## [Unreleased]
+
+### Changed
+
+- **Faster CLI startup.** `numpy` was imported at module scope by
+  `embedding.py` and `index.py`, so every command — including `status`,
+  `--help` and `list-documents`, which never compute an array — paid for it.
+  Measured on a Pi 5: `import guaipeca.mcp_server` drops from ~950ms to
+  ~72ms. `numpy` is now imported on first embed or search; `fastembed` and
+  `bm25s` were already deferred. No behaviour change.
+
 ## [0.5.0] — MCP SDK migration
 
 The MCP transport layer now runs on the official [`mcp`](https://pypi.org/project/mcp/)
