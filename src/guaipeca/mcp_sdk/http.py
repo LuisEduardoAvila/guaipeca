@@ -183,7 +183,14 @@ class _HmacTokenVerifier:
         self._expected_token = expected_token
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        if not hmac.compare_digest(token, self._expected_token):
+        # ``hmac.compare_digest`` only accepts ASCII *str*; a non-ASCII token
+        # (e.g. a UTF-8 Bearer secret sent on the wire) would raise
+        # ``TypeError`` and surface as a 500. Encode both sides to bytes first:
+        # the compare stays constant-time, and a bad token now fails closed
+        # with ``None`` instead of crashing. Never swap this for ``==``.
+        if not hmac.compare_digest(
+            token.encode("utf-8"), self._expected_token.encode("utf-8")
+        ):
             return None
         return AccessToken(token=token, client_id="guaipeca", scopes=[])
 
@@ -207,7 +214,11 @@ def _check_bearer(request: Any, auth_token: str | None) -> bool:
     header = request.headers.get("authorization", "")
     if not header.startswith("Bearer "):
         return False
-    return hmac.compare_digest(header[7:], auth_token)
+    # ``hmac.compare_digest`` rejects non-ASCII *str* with ``TypeError`` (a
+    # malformed/foreign Bearer token used to turn a 401 into a 500 here).
+    # Encode both sides to bytes so the compare is still constant-time but a
+    # non-ASCII token fails closed with ``False``. Do not swap for ``==``.
+    return hmac.compare_digest(header[7:].encode("utf-8"), auth_token.encode("utf-8"))
 
 
 def _cors_origin(request: Any, auth_token: str | None, allowed_origins: list[str] | None) -> str:

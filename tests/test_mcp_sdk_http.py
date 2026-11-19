@@ -11,11 +11,14 @@ correctly rejected with 421.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
+from starlette.requests import Request
 from starlette.testclient import TestClient
 
 # Ensure project root is on sys.path (same preamble as the other HTTP tests)
@@ -27,6 +30,8 @@ from guaipeca.config import CorpusConfig, ServerConfig
 from guaipeca.mcp_sdk.http import (
     _allowed_host_patterns,
     _allowed_origin_patterns,
+    _check_bearer,
+    _HmacTokenVerifier,
     build_app,
 )
 from guaipeca.mcp_server import TOOLS
@@ -744,3 +749,103 @@ def test_server_discover_is_reachable_on_the_modern_era(client):
     # name the SDK model exposes. Comparing the attribute name here would look
     # for a key the server never sends and fail for the wrong reason.
     assert MODERN_VERSION in result.get("supportedVersions", []), result
+
+
+# ---- 10. Non-ASCII Bearer tokens must fail closed, not crash ----------------
+#
+# A Bearer token containing non-ASCII characters made ``hmac.compare_digest`` raise
+# ``TypeError`` (it only accepts ASCII str/bytes), which turned a plain 401 into a
+# 500 on every request. This is a fail-closed bug: an invalid/malformed token must
+# be rejected, not crash the server. The comparison must stay constant-time, so the
+# guard must *protect* the ``hmac.compare_digest`` call rather than swapping it for
+# ``==``. These two tests pin that contract on both code paths.
+
+
+async def _run_asgi(app: Any, scope: dict) -> tuple[int, bytes]:
+    """Drive an ASGI callable directly, capturing status + body.
+
+    Bypasses httpx's *client-side* ASCII header enforcement (the Starlette
+    ``TestClient`` refuses to encode a non-ASCII header value as ASCII before the
+    request ever leaves the client). Real HTTP sends the Authorization header as
+    raw UTF-8 bytes; Starlette decodes scope headers as latin-1, so a non-ASCII
+    token reaches ``_check_bearer`` as a non-ASCII str. Driving the app at the
+    ASGI level reproduces that real path faithfully.
+    """
+    captured: dict[str, Any] = {}
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict) -> None:
+        if message["type"] == "http.response.start":
+            captured["status"] = message["status"]
+        elif message["type"] == "http.response.body":
+            captured.setdefault("body", b"")
+            captured["body"] += message.get("body", b"")
+
+    await app(scope, receive, send)
+    return captured.get("status"), captured.get("body", b"")
+
+
+def test_non_ascii_bearer_token_is_401_not_500():
+    """A non-ASCII Bearer token on a ``_check_bearer`` route yields 401, not 500.
+
+    ``_check_bearer`` guards ``/health``, ``/tools``, ``/download``,
+    ``DELETE /documents`` and, via ``_guard_asgi``, ``/sse`` + ``/messages``.
+    Any one of these routing through the compare is enough to expose the bug;
+    here we assert the observable contract: 401, never a 5xx. The request is
+    driven at the ASGI level (see ``_run_asgi``) so the non-ASCII header reaches
+    the route instead of being rejected by the test client.
+    """
+    stub = StubMCPServer(auth_token="test-secret-token")
+    app = build_app(stub.config, stub)
+    # Raw UTF-8 bytes exactly as the Authorization header would arrive on the
+    # wire; Starlette decodes it as latin-1, so the token is non-ASCII to
+    # ``_check_bearer``. This is the value that makes compare_digest raise.
+    auth_value = "Bearer café-ünïcöde-tökën-ñûñ".encode()  # UTF-8, as on the wire
+
+    for path in ("/health", "/tools"):
+        scope = {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "scheme": "http",
+            "headers": [(b"authorization", auth_value)],
+            "server": ("127.0.0.1", 8090),
+            "client": ("127.0.0.1", 12345),
+        }
+        status, _ = asyncio.run(_run_asgi(app, scope))
+        assert status == 401, (
+            f"{path} returned {status} (expected 401, not a 5xx/crash)"
+        )
+
+
+async def test_hmac_verifier_returns_none_on_non_ascii_token():
+    """``_HmacTokenVerifier.verify_token`` returns None (does not raise) on non-ASCII.
+
+    This is the ``/mcp`` path. A non-ASCII token must be rejected with ``None``,
+    not raise ``TypeError`` into the SDK's auth flow.
+    """
+    verifier = _HmacTokenVerifier("test-secret-token")
+    result = await verifier.verify_token("café-ünïcöde-tökën-ñûñ")
+    assert result is None
+
+
+def test_check_bearer_returns_false_on_non_ascii_token():
+    """``_check_bearer`` fails closed (returns False), does not raise, on non-ASCII.
+
+    Exercises the non-MCP route path directly, bypassing the SDK's
+    ``AuthenticationMiddleware`` so we test ``_check_bearer`` itself. The header
+    arrives as raw UTF-8 bytes on the wire; Starlette decodes it as latin-1, so
+    ``_check_bearer`` sees a non-ASCII string and must compare it without raising.
+    """
+    scope = {
+        "type": "http",
+        "headers": [(b"authorization", b"Bearer caf\xc3\xa9-uni-code")],
+    }
+    request = Request(scope)
+    assert _check_bearer(request, "test-secret-token") is False
