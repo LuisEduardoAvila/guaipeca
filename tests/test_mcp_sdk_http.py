@@ -920,3 +920,41 @@ def test_non_ascii_bearer_with_non_ascii_secret_is_200():
             f"{path} rejected the correct non-ASCII token with {status} "
             "(double-encoding: the wire bytes must be recovered with latin-1)"
         )
+
+
+# ---- 12. A secret that cannot be UTF-8 encoded must fail closed, not 500 -----
+#
+# ``GUAIPECA_AUTH_TOKEN`` is read from the environment, which Python decodes with
+# ``surrogateescape``. A value set under a non-UTF-8 locale can therefore contain
+# lone surrogates, and ``str.encode("utf-8")`` raises on those. Encoding the secret
+# inside the request path would turn that misconfiguration into a 500 on every
+# authenticated route -- the same failure class as the crash this PR fixes, moved
+# from attacker input to operator input. A secret that cannot be encoded can never
+# match anything on the wire, so it must fail closed.
+
+
+def test_check_bearer_fails_closed_on_unencodable_secret():
+    """A surrogate-bearing configured secret rejects instead of raising."""
+    secret = "caf\udce9-token"  # what os.environ yields for b"caf\\xe9-token"
+    scope = {
+        "type": "http",
+        "headers": [(b"authorization", b"Bearer anything")],
+    }
+    assert _check_bearer(Request(scope), secret) is False
+
+
+async def test_hmac_verifier_fails_closed_on_unencodable_secret():
+    """Same guard on the ``/mcp`` path."""
+    verifier = _HmacTokenVerifier("caf\udce9-token")
+    assert await verifier.verify_token("anything") is None
+
+
+async def test_hmac_verifier_fails_closed_on_surrogate_token():
+    """A token that cannot be encoded must return None, never raise.
+
+    Not reachable through an HTTP header today (starlette decodes latin-1, so no
+    surrogates), but ``verify_token`` is a fail-closed boundary and callers other
+    than the SDK may hand it a str built from an environment variable.
+    """
+    verifier = _HmacTokenVerifier("test-secret-token")
+    assert await verifier.verify_token("tok\udcc3") is None

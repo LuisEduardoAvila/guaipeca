@@ -181,8 +181,22 @@ class _HmacTokenVerifier:
 
     def __init__(self, expected_token: str) -> None:
         self._expected_token = expected_token
+        # Encode once here rather than per request. The auth-token environment
+        # variable is read from the environment, and Python decodes env vars
+        # with ``surrogateescape``, so a value set under a non-UTF-8 locale can
+        # contain lone surrogates that ``encode("utf-8")`` refuses -- encoding
+        # lazily in the request path would turn that into a 500 on every
+        # authenticated route, the exact failure mode this module exists to
+        # prevent. A secret that cannot be encoded can never match a token on
+        # the wire, so record ``None`` and fail closed.
+        try:
+            self._expected_bytes: bytes | None = expected_token.encode("utf-8")
+        except UnicodeEncodeError:
+            self._expected_bytes = None
 
     async def verify_token(self, token: str) -> AccessToken | None:
+        if self._expected_bytes is None:
+            return None
         # ``hmac.compare_digest`` only accepts ASCII *str*; a non-ASCII token
         # (e.g. a UTF-8 Bearer secret sent on the wire) would raise
         # ``TypeError`` and surface as a 500. Compare bytes instead: the
@@ -193,9 +207,11 @@ class _HmacTokenVerifier:
         # bytes with ``decode("latin-1")``), so encode it back with latin-1
         # to recover the wire bytes; encoding it as UTF-8 would double-encode
         # and reject a legitimately configured non-ASCII secret.
+        # ``surrogateescape`` keeps a token that cannot round-trip through
+        # latin-1 from raising -- it simply fails to match.
         if not hmac.compare_digest(
             token.encode("latin-1", "surrogateescape"),
-            self._expected_token.encode("utf-8"),
+            self._expected_bytes,
         ):
             return None
         return AccessToken(token=token, client_id="guaipeca", scopes=[])
@@ -230,11 +246,21 @@ def _check_bearer(request: Any, auth_token: str | None) -> bool:
     # lossless, so this round-trips). The secret side is UTF-8: that is what a
     # client sends on the wire. Encoding the header with UTF-8 here would
     # double-encode and reject a correct non-ASCII secret.
-    # ``surrogateescape`` keeps undecodable bytes round-tripping rather than
-    # raising; such a token simply will not match.
+    #
+    # The secret is encoded per call rather than cached because this is a plain
+    # function with no constructor. The environment variable it comes from is
+    # decoded by Python with ``surrogateescape``, so a value set under a
+    # non-UTF-8 locale can hold lone surrogates that ``encode`` refuses; fail
+    # closed (False) instead of raising a 500 on every route.
+    try:
+        expected = auth_token.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    # ``surrogateescape`` keeps a presented token that cannot round-trip
+    # through latin-1 from raising; it simply will not match.
     return hmac.compare_digest(
         header[7:].encode("latin-1", "surrogateescape"),
-        auth_token.encode("utf-8"),
+        expected,
     )
 
 
