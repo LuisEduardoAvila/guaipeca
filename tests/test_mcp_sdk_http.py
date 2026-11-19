@@ -849,3 +849,74 @@ def test_check_bearer_returns_false_on_non_ascii_token():
     }
     request = Request(scope)
     assert _check_bearer(request, "test-secret-token") is False
+
+
+# ---- 11. A non-ASCII *configured secret* must still authenticate ------------
+#
+# The rejection tests above pin the fail-closed half. These pin the other half of
+# the requirement: if the operator configures a non-ASCII secret, a client that
+# sends the correct token (as UTF-8 bytes, which is what every HTTP client does)
+# must be accepted. Without these, a double-encoding bug in the comparison is
+# invisible: every other test configures an ASCII secret and asserts rejection,
+# which passes whether or not the compare encodes the header correctly.
+#
+# Starlette decodes ASGI header bytes as latin-1, so the app must recover the wire
+# bytes (``encode("latin-1")``) rather than re-encoding the decoded str as UTF-8.
+
+
+def test_check_bearer_accepts_correct_non_ascii_secret():
+    """``_check_bearer`` accepts the UTF-8 wire form of a non-ASCII secret."""
+    secret = "sëcret-ñ"
+    scope = {
+        "type": "http",
+        "headers": [(b"authorization", b"Bearer " + secret.encode("utf-8"))],
+    }
+    assert _check_bearer(Request(scope), secret) is True
+
+
+async def test_hmac_verifier_accepts_correct_non_ascii_secret():
+    """``_HmacTokenVerifier`` accepts the latin-1-decoded form of the wire token.
+
+    ``verify_token`` receives whatever the SDK extracted from the latin-1-decoded
+    header, which is what ``Request`` hands ``_check_bearer`` above.
+    """
+    secret = "sëcret-ñ"
+    scope = {
+        "type": "http",
+        "headers": [(b"authorization", b"Bearer " + secret.encode("utf-8"))],
+    }
+    presented = Request(scope).headers["authorization"][7:]
+    assert await _HmacTokenVerifier(secret).verify_token(presented) is not None
+
+
+def test_non_ascii_bearer_with_non_ascii_secret_is_200():
+    """End to end: ASGI request with the correct non-ASCII token is authorized.
+
+    Same ASGI-level driver as the 401 test — ``TestClient`` cannot send a
+    non-ASCII header at all, so this is the only way to exercise the accept path
+    with the bytes a real client sends.
+    """
+    secret = "café-ünïcöde-tökën-ñûñ"
+    stub = StubMCPServer(auth_token=secret)
+    app = build_app(stub.config, stub)
+    auth_value = ("Bearer " + secret).encode("utf-8")
+
+    for path in ("/health", "/tools"):
+        scope = {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "scheme": "http",
+            "headers": [(b"authorization", auth_value)],
+            "server": ("127.0.0.1", 8090),
+            "client": ("127.0.0.1", 12345),
+        }
+        status, _ = asyncio.run(_run_asgi(app, scope))
+        assert status == 200, (
+            f"{path} rejected the correct non-ASCII token with {status} "
+            "(double-encoding: the wire bytes must be recovered with latin-1)"
+        )

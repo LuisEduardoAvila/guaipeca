@@ -185,11 +185,17 @@ class _HmacTokenVerifier:
     async def verify_token(self, token: str) -> AccessToken | None:
         # ``hmac.compare_digest`` only accepts ASCII *str*; a non-ASCII token
         # (e.g. a UTF-8 Bearer secret sent on the wire) would raise
-        # ``TypeError`` and surface as a 500. Encode both sides to bytes first:
-        # the compare stays constant-time, and a bad token now fails closed
+        # ``TypeError`` and surface as a 500. Compare bytes instead: the
+        # compare stays constant-time, and a bad token now fails closed
         # with ``None`` instead of crashing. Never swap this for ``==``.
+        #
+        # The token arrives latin-1-decoded (starlette decodes raw header
+        # bytes with ``decode("latin-1")``), so encode it back with latin-1
+        # to recover the wire bytes; encoding it as UTF-8 would double-encode
+        # and reject a legitimately configured non-ASCII secret.
         if not hmac.compare_digest(
-            token.encode("utf-8"), self._expected_token.encode("utf-8")
+            token.encode("latin-1", "surrogateescape"),
+            self._expected_token.encode("utf-8"),
         ):
             return None
         return AccessToken(token=token, client_id="guaipeca", scopes=[])
@@ -216,9 +222,20 @@ def _check_bearer(request: Any, auth_token: str | None) -> bool:
         return False
     # ``hmac.compare_digest`` rejects non-ASCII *str* with ``TypeError`` (a
     # malformed/foreign Bearer token used to turn a 401 into a 500 here).
-    # Encode both sides to bytes so the compare is still constant-time but a
-    # non-ASCII token fails closed with ``False``. Do not swap for ``==``.
-    return hmac.compare_digest(header[7:].encode("utf-8"), auth_token.encode("utf-8"))
+    # Compare bytes so the compare is still constant-time while a non-ASCII
+    # token fails closed with ``False``. Do not swap for ``==``.
+    #
+    # starlette decoded the header as latin-1, so encode the presented value
+    # back with latin-1 to recover the exact wire bytes (starlette's decode is
+    # lossless, so this round-trips). The secret side is UTF-8: that is what a
+    # client sends on the wire. Encoding the header with UTF-8 here would
+    # double-encode and reject a correct non-ASCII secret.
+    # ``surrogateescape`` keeps undecodable bytes round-tripping rather than
+    # raising; such a token simply will not match.
+    return hmac.compare_digest(
+        header[7:].encode("latin-1", "surrogateescape"),
+        auth_token.encode("utf-8"),
+    )
 
 
 def _cors_origin(request: Any, auth_token: str | None, allowed_origins: list[str] | None) -> str:
