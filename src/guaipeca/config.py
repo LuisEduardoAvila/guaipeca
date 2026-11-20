@@ -351,6 +351,20 @@ class GuaipecaConfig:
             raise ValueError(f"server.port must be an integer 1-65535, got: {self.server.port!r}")
         if self.server.auth_token is not None and not isinstance(self.server.auth_token, str):
             raise ValueError(f"server.auth_token must be a string or null, got: {type(self.server.auth_token).__name__}")
+        # An explicitly configured but empty token is falsy, so the charset check
+        # below is skipped AND _check_bearer's `if not auth_token: return True`
+        # short-circuits before reading the header at all. Measured: with
+        # auth_token: "" every request authenticated, including one with no
+        # Authorization header. That is worse than an open server, because a
+        # configured token makes it look protected. Absent/null stays the way to
+        # disable auth; an empty string is a typo, not a decision.
+        if self.server.auth_token is not None and not self.server.auth_token.strip():
+            raise ValueError(
+                "server.auth_token is empty (or whitespace only). A configured "
+                "token must have a value: an empty one would silently disable "
+                "authentication while appearing to enable it. Remove the "
+                "auth_token key entirely to run without authentication."
+            )
         # Starlette decodes request headers as latin-1, so a presented Bearer
         # token can only ever contain U+0000-U+00FF. A secret above that range
         # could never match any request, and the operator would see a permanent
