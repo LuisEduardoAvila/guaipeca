@@ -351,6 +351,21 @@ class GuaipecaConfig:
             raise ValueError(f"server.port must be an integer 1-65535, got: {self.server.port!r}")
         if self.server.auth_token is not None and not isinstance(self.server.auth_token, str):
             raise ValueError(f"server.auth_token must be a string or null, got: {type(self.server.auth_token).__name__}")
+        # Starlette decodes request headers as latin-1, so a presented Bearer
+        # token can only ever contain U+0000-U+00FF. A secret above that range
+        # could never match any request, and the operator would see a permanent
+        # 401 with no diagnostic (#43). Reject it here, where it is actionable.
+        if self.server.auth_token:
+            try:
+                self.server.auth_token.encode("latin-1")
+            except UnicodeEncodeError:
+                raise ValueError(
+                    "server.auth_token contains characters above U+00FF, which "
+                    "a Bearer header cannot carry (headers are decoded as "
+                    "latin-1). Such a token could never authenticate and every "
+                    "request would get a silent 401. Use printable ASCII, or "
+                    "Latin-1 characters at most."
+                ) from None
         if not isinstance(self.server.max_body_size, int) or self.server.max_body_size < 1:
             raise ValueError(f"server.max_body_size must be a positive integer, got: {self.server.max_body_size!r}")
         if self.server.transport == "sse":

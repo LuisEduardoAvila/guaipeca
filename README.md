@@ -595,6 +595,11 @@ Push to `main` triggers a GitHub Actions workflow that:
 - **Authentication:** Set `auth_token` in the server config to require
   `Authorization: Bearer <token>` headers on HTTP requests. When auth is enabled,
   CORS is restricted (no wildcard origin).
+  The token must be representable in Latin-1 (printable ASCII is the safe
+  choice): HTTP headers are decoded as Latin-1, so a secret containing
+  characters above U+00FF — CJK, emoji — could never be presented and would
+  fail every request with a 401. Such a token is rejected when the config is
+  loaded, not at request time.
 - **Origin validation (DNS-rebinding protection):** browser requests carry an
   `Origin` header, and incoming requests with an unrecognised origin are
   rejected with `403 Forbidden` before the auth check. By default only loopback

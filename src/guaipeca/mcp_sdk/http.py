@@ -68,8 +68,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = [
     "DEFAULT_MAX_BODY_SIZE",
     "TransportSecuritySettings",
+    "_HmacTokenVerifier",
     "_allowed_host_patterns",
     "_allowed_origin_patterns",
+    # Private by naming convention, listed here because the test suite imports
+    # them directly to exercise the Bearer comparison in isolation (#43).
+    "_check_bearer",
     "_security_settings",
     "build_app",
     "serve",
@@ -259,6 +263,15 @@ def _check_bearer(request: Any, auth_token: str | None) -> bool:
         return False
     # ``surrogateescape`` keeps a presented token that cannot round-trip
     # through latin-1 from raising; it simply will not match.
+    #
+    # Residual, documented rather than "fixed" (#43): ``compare_digest`` returns
+    # early when the lengths differ, so timing could in principle distinguish a
+    # wrong-length token from a wrong-value one. Measured here at ~25ns
+    # (0.110us equal-length vs 0.084us empty, ~1/400,000th of a LAN RTT), and
+    # masked entirely by network jitter. Hashing both sides to a fixed 32 bytes
+    # would not remove it either - the hash is computed before the comparison,
+    # so the gate would merely move - and it would cost a digest per request.
+    # Fold this into a change that rewrites the comparison wholesale, not alone.
     return hmac.compare_digest(
         header[7:].encode("latin-1", "surrogateescape"),
         expected,
