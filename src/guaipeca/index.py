@@ -1123,7 +1123,7 @@ class CorpusIndex:
             # Over-fetch to compensate for stale results that will be filtered out
             fetch_k = min(top_k * 3, faiss_index.ntotal)
 
-            # Deferred: numpy costs ~830ms to import on the Pi 5 (#32).
+            # Deferred to first use (#32).
             import numpy as np
 
             # Search FAISS while holding the read lock
@@ -1230,7 +1230,7 @@ class CorpusIndex:
 
         self._check_dense_metric(require_floor=require_floor)
 
-        # Deferred: numpy costs ~830ms to import on the Pi 5 (#32).
+        # Deferred to first use (#32).
         import numpy as np
 
         # Try direct section_id match first

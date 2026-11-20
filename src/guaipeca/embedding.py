@@ -325,8 +325,8 @@ class EmbeddingService:
             numpy array of shape (len(texts), dimensions), L2-normalized for
             cosine similarity via inner product.
         """
-        # Deferred: numpy costs ~830ms to import on the Pi 5, and every CLI
-        # command reaches this module. Only an actual embed needs it (#32).
+        # Deferred to first use (#32): importing numpy is the bulk of the CLI's
+        # startup cost, and most commands never embed.
         import numpy as np
 
         if not texts:
