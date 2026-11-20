@@ -28,6 +28,7 @@ import os
 import sys
 from pathlib import Path
 
+from . import __version__
 from .config import GuaipecaConfig
 
 DEFAULT_CONFIG_PATHS = [
@@ -582,6 +583,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", "-c", help="Path to config YAML file")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
+    # Bare version, matching what /health and the MCP initialize response
+    # report, so a script can compare the two without stripping a prefix (#45).
+    parser.add_argument("--version", action="version", version=__version__)
     # P1-6: --check-model flag to check/download model without starting server
     parser.add_argument(
         "--check-model",

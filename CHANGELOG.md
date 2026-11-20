@@ -3,7 +3,19 @@
 Notable changes to Guaipeca. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are semver.
 
-## [Unreleased]
+## [0.6.0] — 2026-11-20
+
+Fixes and hardening since 0.5.0. No breaking changes.
+
+### Added
+
+- **`guaipeca --version`.** Prints the bare package version, the same string
+  `/health` and the MCP `initialize` response report, and exits 0. Previously
+  the flag did not exist, so a shell check of a deployed host had no CLI
+  surface at all (#45).
+- **Container images are tagged by version.** `ghcr.io/.../guaipeca:<version>`
+  joins `latest` and the short sha, so an image can be pinned to a release
+  rather than looked up by commit (#45).
 
 ### Changed
 
@@ -15,7 +27,46 @@ Notable changes to Guaipeca. Format loosely follows
   already deferred. Commands that embed or search now pay that import on their
   first call instead of at startup — the cost moves, it does not vanish. In a
   broken install (numpy missing or ABI-mismatched) the failure therefore
-  surfaces at first use rather than at startup.
+  surfaces at first use rather than at startup (#32).
+- **A `v*` tag must match the declared version.** CI now runs
+  `tools/release_check.py` on tag builds and fails when `v0.6.1` is pushed on a
+  tree declaring `0.6.0`. The two version files were already checked against
+  each other; the release tag was not (#45).
+
+### Fixed
+
+- **A Bearer token containing non-ASCII characters returned 500, not 401.**
+  `hmac.compare_digest` raised `TypeError` on str input, so every authenticated
+  route errored instead of refusing. Both Bearer paths now compare bytes,
+  keeping the comparison constant-time (fail closed) (#41).
+- **A legitimately configured non-ASCII secret rejected every real client.**
+  Re-encoding starlette's latin-1-decoded header as UTF-8 double-encoded it; the
+  presented token is now re-encoded with latin-1 so the compare is against the
+  actual wire bytes (#41).
+- **A secret containing lone surrogates (non-UTF-8 locale) was a 500 on every
+  authenticated route.** The token is now encoded once at construction, and a
+  secret that cannot be encoded fails closed (#41).
+- **Two threads could each build an embedding model.** The lazy `model` property
+  had no lock, so concurrent first use constructed two ONNX sessions. Now
+  thread-safe and fail-fast (#31).
+- **A fresh clone silently indexed nothing.** Copying the sample config to a
+  missing `~/.guaipeca/` fell back to the bundled sample, whose corpora point at
+  `/path/to/your/docs`, and `index` printed `Files indexed: 0` with exit 0. Three
+  guards now distinguish an unedited sample (exit 2), a nonexistent corpus path
+  (exit 1) and a genuinely empty folder (warning, exit 0) (#33).
+
+### Removed
+
+- Dead code left by the MCP SDK migration: an uncalled `_cors_origin` duplicating
+  the origin policy, a docstring promising a check the body never performed, and
+  references to functions deleted with the hand-rolled server (#38).
+
+### Notes
+
+- **Reporting a version is not the same as running it.** An installed copy keeps
+  executing its old code until it is reinstalled and the service restarted —
+  `sudo systemctl restart guaipeca`. `/health` will report the version of the
+  binary it is actually running, not the newest release (#45).
 
 ## [0.5.0] — MCP SDK migration
 
