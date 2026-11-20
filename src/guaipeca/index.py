@@ -24,8 +24,10 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import numpy as np
+if TYPE_CHECKING:  # issue #32: annotation-only, must not cost an import
+    import numpy as np
 
 from .chunking import Chunk, chunk_file
 from .config import ChunkingConfig, CorpusConfig, IndexingConfig
@@ -1032,6 +1034,8 @@ class CorpusIndex:
 
         # Add new embeddings to FAISS index
         if new_embeddings:
+            import numpy as np
+
             all_new = np.vstack(new_embeddings)
             self._faiss_index.add(all_new)
             self._chunks.extend(new_chunks)
@@ -1118,6 +1122,9 @@ class CorpusIndex:
 
             # Over-fetch to compensate for stale results that will be filtered out
             fetch_k = min(top_k * 3, faiss_index.ntotal)
+
+            # Deferred to first use (#32).
+            import numpy as np
 
             # Search FAISS while holding the read lock
             scores, indices = faiss_index.search(
@@ -1222,6 +1229,9 @@ class CorpusIndex:
             return []
 
         self._check_dense_metric(require_floor=require_floor)
+
+        # Deferred to first use (#32).
+        import numpy as np
 
         # Try direct section_id match first
         positions = section_to_positions.get(section_filter, [])
