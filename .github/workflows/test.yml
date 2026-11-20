@@ -5,7 +5,9 @@ name: Tests
 
 on:
   push:
-    branches: [main, develop]
+    # `develop` was never created and is not planned; listing it implied a
+    # workflow nobody follows (#48).
+    branches: [main]
     # Release tags must be checked too, or the version guard below can never
     # fire: `branches:` alone ignores tag pushes entirely (#45).
     tags:
