@@ -51,7 +51,7 @@ def run_status(monkeypatch, capsys):
         monkeypatch.setattr(
             "guaipeca.search.Searcher", lambda **kw: fake
         )
-        cli.cmd_status(type("A", (), {"config": "ignored"})())
+        cli.cmd_status(type("A", (), {"config": "ignored", "json": False})())
         return capsys.readouterr().out
 
     return _run

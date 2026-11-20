@@ -371,12 +371,12 @@ Guaipeca supports three STAIR-inspired features that leverage document structure
 
 ```bash
 guaipeca --check-model                 # Check/download embedding model
-guaipeca index [corpus] [--force]      # Index corpora
-guaipeca search "query" [--top-k N]    # Search
+guaipeca index [corpus] [--force] [--json]      # Index corpora
+guaipeca search "query" [--top-k N] [--json]    # Search
 guaipeca search "query" --hybrid       # Hybrid search (BM25 + FAISS)
 guaipeca search "query" --return-mode auto --max-chars 12000   # Auto mode
 guaipeca search "query" --section-mode --section-filter "Chapter 3"
-guaipeca status                        # Show stats
+guaipeca status [--json]               # Show stats
 guaipeca get-chunk <chunk_id>          # Retrieve full chunk text
 guaipeca get-document --corpus C --path /abs/file.md   # Retrieve document text
 guaipeca list-documents [corpus]       # List indexed documents
@@ -388,11 +388,17 @@ guaipeca serve [--transport both] [--port 8090]  # Start MCP server
 ```
 
 The CLI mirrors the MCP tools one-for-one (except `serve`, which is
-CLI-only). Read/upload/delete commands print the same JSON payloads the MCP
-server returns. `guaipeca search` accepts the same knobs as the MCP `search`
-tool: `--return-mode`, `--max-chars`, `--section-mode`, and `--section-filter`
-(in addition to `--top-k`, `--corpora`, and `--hybrid`). A parity test
-(`tests/test_cli_mcp_parity.py`) fails if the two surfaces drift apart.
+CLI-only). The read/upload/delete commands (`get-chunk`, `get-document`,
+`list-documents`, `list-folders`, `get-toc`, `upload`, `delete`) print the
+same JSON payloads the MCP server returns by default. The three most-scripted
+commands — `search`, `status`, and `index` — print human-readable text by
+default and accept `--json` to print the same JSON payload instead; on an
+error payload they exit 1, write to stderr, and leave stdout empty, so the
+output is safe to pipe into `jq`. `guaipeca search` accepts the same knobs as
+the MCP `search` tool: `--return-mode`, `--max-chars`, `--section-mode`, and
+`--section-filter` (in addition to `--top-k`, `--corpora`, and `--hybrid`). A
+parity test (`tests/test_cli_mcp_parity.py`) fails if the two surfaces drift
+apart.
 
 ## Running as a systemd Service
 

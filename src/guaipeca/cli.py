@@ -252,6 +252,13 @@ def cmd_index(args):
     _, _, searcher = _create_services(config)
     result = searcher.index_corpus(corpus_name=corpus, force=args.force)
 
+    if args.json:
+        # The sample-config (exit 2) and missing-corpus (exit 1) guards above
+        # already ran as plain-text stderr; only a real index result reaches
+        # here. _emit exits 1 on an error payload and prints the stats as JSON.
+        _emit(result)
+        return
+
     if "error" in result:
         print(f"Error: {result['error']}", file=sys.stderr)
         sys.exit(1)
@@ -311,6 +318,12 @@ def cmd_search(args):
         section_filter=args.section_filter,
         max_distance=args.max_distance,
     )
+
+    if args.json:
+        # _emit exits 1 on an error payload (stderr, empty stdout) and prints
+        # the same JSON document the MCP search tool returns on success.
+        _emit(result)
+        return
 
     if "error" in result:
         print(f"Error: {result['error']}", file=sys.stderr)
@@ -390,6 +403,9 @@ def cmd_status(args):
     searcher = Searcher(config=config, embedding_service=embedder)
 
     status = searcher.status
+    if args.json:
+        _emit(status)
+        return
     print("\nGuaipeca Status")
     print(f"  Embedding model: {status['embedding_model']}")
     print(f"  Dimensions: {status['dimensions']}")
@@ -599,6 +615,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_index = subparsers.add_parser("index", help="Index corpora")
     p_index.add_argument("corpus", nargs="?", default="all", help="Corpus name or 'all'")
     p_index.add_argument("--force", action="store_true", help="Force re-index all files")
+    p_index.add_argument(
+        "--json", action="store_true", help="Print the result as JSON instead of text"
+    )
     p_index.set_defaults(func=cmd_index)
 
     # search
@@ -638,10 +657,16 @@ def build_parser() -> argparse.ArgumentParser:
             "(omit to use config; lower = stricter)"
         ),
     )
+    p_search.add_argument(
+        "--json", action="store_true", help="Print the result as JSON instead of text"
+    )
     p_search.set_defaults(func=cmd_search)
 
     # status
     p_status = subparsers.add_parser("status", help="Show index statistics")
+    p_status.add_argument(
+        "--json", action="store_true", help="Print the result as JSON instead of text"
+    )
     p_status.set_defaults(func=cmd_status)
 
     # serve

@@ -145,7 +145,7 @@ def _stats(corpus: str, indexed: int, skipped: int, chunks: int = 0) -> dict:
 
 def _args(**kwargs) -> argparse.Namespace:
     """argparse.Namespace with the defaults cmd_index/cmd_status rely on."""
-    base = {"config": None, "corpus": None, "force": False}
+    base = {"config": None, "corpus": None, "force": False, "json": False}
     base.update(kwargs)
     return argparse.Namespace(**base)
 
