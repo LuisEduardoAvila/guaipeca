@@ -5,7 +5,9 @@ name: Tests
 
 on:
   push:
-    branches: [main, develop]
+    # `develop` was never created and is not planned; listing it implied a
+    # workflow nobody follows (#48).
+    branches: [main]
     # Release tags must be checked too, or the version guard below can never
     # fire: `branches:` alone ignores tag pushes entirely (#45).
     tags:
@@ -17,10 +19,10 @@ on:
       - '.github/workflows/test.yml'
   pull_request:
     branches: [main]
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'pyproject.toml'
+    # No `paths:` filter on PRs, deliberately. A required check that never
+    # runs for a docs-only PR leaves it permanently unmergeable, and a PR
+    # touching CONTRIBUTING.md or the Dockerfile used to run no tests at all
+    # while looking green. Push-to-main keeps its filter; a PR pays the ~3min.
 
 jobs:
   test:
