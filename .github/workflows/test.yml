@@ -6,6 +6,10 @@ name: Tests
 on:
   push:
     branches: [main, develop]
+    # Release tags must be checked too, or the version guard below can never
+    # fire: `branches:` alone ignores tag pushes entirely (#45).
+    tags:
+      - 'v*'
     paths:
       - 'src/**'
       - 'tests/**'
