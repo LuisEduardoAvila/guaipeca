@@ -45,6 +45,12 @@ jobs:
       - name: Lint with ruff
         run: ruff check src/
 
+      # #45: a release tag must equal v + the declared version. Skipped (exit 0)
+      # on ordinary pushes and PRs, where there is no tag to check.
+      - name: Check tag matches declared version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: python3 tools/release_check.py "${GITHUB_REF_NAME}"
+
       - name: Run tests
         run: python -m pytest tests/ -v --tb=short
         env:

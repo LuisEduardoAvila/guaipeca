@@ -49,6 +49,11 @@ jobs:
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
           echo "image_lower=$(echo ${{ env.IMAGE_NAME }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+          # Version tag (#45): an image tagged by sha alone says nothing about
+          # which release it is, so someone pinning a compatible image has to
+          # look up the commit. Derived from the source of truth, not the ref.
+          VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/guaipeca/__init__.py)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Build and push (multi-arch)
         uses: docker/build-push-action@v6
@@ -60,6 +65,7 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.image_lower }}:latest
             ${{ steps.meta.outputs.image_lower }}:${{ steps.meta.outputs.short_sha }}
+            ${{ steps.meta.outputs.image_lower }}:${{ steps.meta.outputs.version }}
           cache-from: type=registry,ref=${{ steps.meta.outputs.image_lower }}:buildcache
           cache-to: type=registry,ref=${{ steps.meta.outputs.image_lower }}:buildcache,mode=max
           provenance: false
