@@ -202,6 +202,24 @@ def _emit(result: dict) -> None:
     _print_json(result)
 
 
+def _corpus_errors(result: dict) -> list[str]:
+    """Per-corpus error strings inside an aggregated index result.
+
+    ``index_corpus("all")`` returns ``{"corpora": [...]}`` and each entry may
+    carry ``error`` (lock contention, unusable lock file). Those are real
+    failures, but they sit below the top-level key ``_emit`` inspects, so a run
+    whose corpus was skipped for a lock reported success in both output modes.
+    Returned rather than printed so the JSON and human paths cannot drift apart.
+    """
+    if not isinstance(result, dict):
+        return []
+    return [
+        str(entry["error"])
+        for entry in result.get("corpora") or []
+        if isinstance(entry, dict) and entry.get("error")
+    ]
+
+
 def _print_index_stats(stats: dict) -> None:
     """Print one corpus's index stats (per-corpus dict shape)."""
     print(f"\n[{stats['corpus']}]")
@@ -251,6 +269,22 @@ def cmd_index(args):
 
     _, _, searcher = _create_services(config)
     result = searcher.index_corpus(corpus_name=corpus, force=args.force)
+
+    # A per-corpus failure inside an aggregated result is a failure, not a
+    # partial success: check it before either output path so they agree.
+    per_corpus_errors = _corpus_errors(result)
+    if per_corpus_errors:
+        for message in per_corpus_errors:
+            print(f"Error: {message}", file=sys.stderr)
+        print(f"Error: {len(per_corpus_errors)} corpus(es) were not indexed", file=sys.stderr)
+        sys.exit(1)
+
+    if args.json:
+        # The sample-config (exit 2) and missing-corpus (exit 1) guards above
+        # already ran as plain-text stderr; only a real index result reaches
+        # here. _emit exits 1 on an error payload and prints the stats as JSON.
+        _emit(result)
+        return
 
     if "error" in result:
         print(f"Error: {result['error']}", file=sys.stderr)
@@ -311,6 +345,12 @@ def cmd_search(args):
         section_filter=args.section_filter,
         max_distance=args.max_distance,
     )
+
+    if args.json:
+        # _emit exits 1 on an error payload (stderr, empty stdout) and prints
+        # the same JSON document the MCP search tool returns on success.
+        _emit(result)
+        return
 
     if "error" in result:
         print(f"Error: {result['error']}", file=sys.stderr)
@@ -390,6 +430,9 @@ def cmd_status(args):
     searcher = Searcher(config=config, embedding_service=embedder)
 
     status = searcher.status
+    if args.json:
+        _emit(status)
+        return
     print("\nGuaipeca Status")
     print(f"  Embedding model: {status['embedding_model']}")
     print(f"  Dimensions: {status['dimensions']}")
@@ -599,6 +642,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_index = subparsers.add_parser("index", help="Index corpora")
     p_index.add_argument("corpus", nargs="?", default="all", help="Corpus name or 'all'")
     p_index.add_argument("--force", action="store_true", help="Force re-index all files")
+    p_index.add_argument(
+        "--json", action="store_true", help="Print the result as JSON instead of text"
+    )
     p_index.set_defaults(func=cmd_index)
 
     # search
@@ -638,10 +684,16 @@ def build_parser() -> argparse.ArgumentParser:
             "(omit to use config; lower = stricter)"
         ),
     )
+    p_search.add_argument(
+        "--json", action="store_true", help="Print the result as JSON instead of text"
+    )
     p_search.set_defaults(func=cmd_search)
 
     # status
     p_status = subparsers.add_parser("status", help="Show index statistics")
+    p_status.add_argument(
+        "--json", action="store_true", help="Print the result as JSON instead of text"
+    )
     p_status.set_defaults(func=cmd_status)
 
     # serve

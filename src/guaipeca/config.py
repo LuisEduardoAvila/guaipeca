@@ -351,6 +351,48 @@ class GuaipecaConfig:
             raise ValueError(f"server.port must be an integer 1-65535, got: {self.server.port!r}")
         if self.server.auth_token is not None and not isinstance(self.server.auth_token, str):
             raise ValueError(f"server.auth_token must be a string or null, got: {type(self.server.auth_token).__name__}")
+        # An explicitly configured but empty token is falsy, so the charset check
+        # below is skipped AND _check_bearer's `if not auth_token: return True`
+        # short-circuits before reading the header at all. Measured: with
+        # auth_token: "" every request authenticated, including one with no
+        # Authorization header. That is worse than an open server, because a
+        # configured token makes it look protected. Absent/null stays the way to
+        # disable auth; an empty string is a typo, not a decision.
+        if self.server.auth_token is not None and not self.server.auth_token.strip():
+            raise ValueError(
+                "server.auth_token is empty (or whitespace only). A configured "
+                "token must have a value: an empty one would silently disable "
+                "authentication while appearing to enable it. Remove the "
+                "auth_token key entirely to run without authentication."
+            )
+        # Non-ASCII token carriage is client-dependent, and that is the reason
+        # for this gate (#43). The comparison encodes the secret as UTF-8, so a
+        # client that sends UTF-8 header bytes CAN authenticate with a secret
+        # above U+00FF - this is not a hard protocol limit. But clients that
+        # encode the header as latin-1 (Python's http.client, some proxies) send
+        # different bytes and get a permanent silent 401, and the operator has
+        # no way to tell which kind their client is. Restricting to ASCII makes
+        # the token portable; anything else is a trap waiting for a client swap.
+        #
+        # Control characters are rejected for the same reason from the other
+        # direction: they encode fine but cannot legally appear in an HTTP field
+        # value, so the token could never be presented at all.
+        if self.server.auth_token:
+            try:
+                self.server.auth_token.encode("latin-1")
+            except UnicodeEncodeError:
+                raise ValueError(
+                    "server.auth_token contains characters above U+00FF. Those "
+                    "only authenticate with clients that send UTF-8 header "
+                    "bytes; latin-1 clients would get a permanent silent 401. "
+                    "Use printable ASCII."
+                ) from None
+            if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in self.server.auth_token):
+                raise ValueError(
+                    "server.auth_token contains control characters, which cannot "
+                    "appear in an HTTP header value; such a token could never be "
+                    "presented. Use printable ASCII."
+                )
         if not isinstance(self.server.max_body_size, int) or self.server.max_body_size < 1:
             raise ValueError(f"server.max_body_size must be a positive integer, got: {self.server.max_body_size!r}")
         if self.server.transport == "sse":

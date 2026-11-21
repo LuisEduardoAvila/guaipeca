@@ -1,0 +1,61 @@
+{
+  "role": "challenger",
+  "findings": [
+    {
+      "id": "C1",
+      "category": "state",
+      "assumption": "cmd_status's non-JSON path will never encounter an error payload from searcher.status",
+      "break_scenario": "searcher.status is currently a property that constructs a dict directly — it can't return an error dict. But the --json path uses _emit() which checks for errors, while the non-JSON path directly accesses status['embedding_model'] with no guard. If status is ever refactored to a method that can return an error dict (e.g., on a corrupted index), the --json path handles it gracefully (exit 1, stderr) but the non-JSON path crashes with a KeyError. The test test_status_json_error_exits_1_empty_stdout exercises a scenario that cannot actually occur through the normal code path.",
+      "impact": "Latent divergence: refactoring status from property to method would silently break the non-JSON path while the JSON path continues to work. Operators relying on human-readable output would see a 500 traceback instead of a clean error message.",
+      "severity": "P1",
+      "suggestion": "Add the same error guard to the non-JSON path: check if 'error' in status before printing, or refactor so both paths share the same decision logic (e.g., always assign result = _emit(status) if args.json else _print_status_text(status))."
+    },
+    {
+      "id": "C2",
+      "category": "error_handling",
+      "assumption": "The hmac.compare_digest length-gate timing side-channel is 'masked entirely by network jitter' and needs no fix",
+      "break_scenario": "The comment documents that compare_digest returns early on length mismatch (~25ns difference), and dismisses it as negligible. However, for a security-focused SDK this is a genuine information leak: an attacker can distinguish wrong-length tokens from wrong-value tokens. On a LAN this is measurable. The comment even says hashing both sides wouldn't remove it, but it would at least prevent the length leak — the cost is one digest per request, which is acceptable for a security boundary.",
+      "impact": "An attacker with network access can determine the exact length of a valid auth_token, narrowing brute-force search space. For a token like 'secret' (6 chars) vs 's3cr3t!' (7 chars), this leaks the byte count.",
+      "severity": "P2",
+      "suggestion": "At minimum, pad both sides to a fixed length before compare_digest. Hashing both sides to SHA-256 and comparing the hashes would eliminate the length gate entirely. The cost is one digest per request (~microseconds), which is negligible compared to network RTT. Document this trade-off explicitly."
+    },
+    {
+      "id": "C3",
+      "category": "error_handling",
+      "assumption": "The Authorization header in _check_bearer will always have clean 'Bearer <token>' format with no extra whitespace",
+      "break_scenario": "_check_bearer does header[7:] to extract the token after 'Bearer ', but doesn't strip whitespace. A header like 'Bearer  token' (double space, which some HTTP clients add), 'Bearer token ' (trailing space), or 'Bearer\\ttoken' (tab) would produce a wrong-length or wrong-value comparison, causing a 401 for an otherwise valid token. The _HmacTokenVerifier.verify_token has the same issue with the raw token parameter.",
+      "impact": "Intermittent 401 errors when HTTP clients, reverse proxies, or middleware add whitespace to the Authorization header. This is particularly common with frameworks that re-encode headers or with curl when the token is shell-interpolated.",
+      "severity": "P2",
+      "suggestion": "Strip the token after extraction: header[7:].strip() in _check_bearer, and token.strip() in _HmacTokenVerifier.verify_token. Or use a regex like r'^Bearer\\s+(.+)$' to parse the header robustly."
+    },
+    {
+      "id": "C4",
+      "category": "error_handling",
+      "assumption": "from None on the UnicodeEncodeError is always the right choice for cleaner error messages",
+      "break_scenario": "The ValueError for auth_token with chars above U+00FF uses 'from None' to suppress the UnicodeEncodeError chaining. While this gives a cleaner user-facing message, it also strips the original traceback. In a production deployment where an operator sets a token via an environment variable that was set from a non-UTF-8 locale, the root cause (surrogateescape artifact) is hidden, making debugging harder.",
+      "impact": "When auth_token validation fails in production, the operator sees a helpful error message but loses the chain of events that led to it. If the token was set via environment variable from a script, the operator can't trace back to the source.",
+      "severity": "P2",
+      "suggestion": "Use a custom exception with a clear message but preserve the chain: raise ValueError('...') from the original UnicodeEncodeError (i.e., remove 'from None'), or create a dedicated AuthTokenValidationError that wraps the original error. This keeps the message clean while preserving debuggability."
+    },
+    {
+      "id": "C5",
+      "category": "dependency",
+      "assumption": "hmac.compare_digest only accepts bytes or ASCII str, and non-ASCII inputs raise TypeError",
+      "break_scenario": "The code converts both sides to bytes before compare_digest to avoid the TypeError that would occur with non-ASCII strings. This is correct for Python 3.13. However, the comment says 'hmac.compare_digest only accepts ASCII str' — this behavior could change in future Python versions (PEP 672 proposed allowing arbitrary bytes/str). If a future Python version relaxes this, the byte conversion becomes unnecessary, and if it tightens it, the code could break.",
+      "impact": "Potential breakage on Python version upgrades if compare_digest's type handling changes. The current byte conversion is a defensive workaround that may become incompatible.",
+      "severity": "P2",
+      "suggestion": "Keep the byte conversion as it is (it's correct now), but add a comment noting this is a Python version compatibility measure. Consider adding a test that verifies compare_digest receives bytes, so any future Python change that breaks this pattern is caught by the test suite."
+    },
+    {
+      "id": "C6",
+      "category": "configuration",
+      "assumption": "An empty string auth_token is a harmless no-op that disables auth",
+      "break_scenario": "An empty string passes all validation: isinstance(str) is True, ''.encode('latin-1') succeeds, ''.encode('utf-8') succeeds, and 'if not auth_token' is True so _check_bearer returns True. This means a config with auth_token: '' silently disables authentication. An operator who intended to set auth_token: mysecret but mistyped auth_token: '' would have no auth protection.",
+      "impact": "Silent security degradation: a typo in the config file disables authentication without any warning or error. The operator would see the server running normally but with no auth enforcement.",
+      "severity": "P2",
+      "suggestion": "Reject empty strings explicitly: if auth_token == '': raise ValueError('auth_token must be non-empty when set'). This turns a silent security failure into an actionable error at config load time."
+    }
+  ],
+  "summary": "The --json implementation is structurally sound with good test coverage, but three areas need attention: the status command has a latent error-handling asymmetry between JSON and non-JSON paths, the Bearer token comparison has an unmitigated timing side-channel that's dismissed too casually, and whitespace handling in _check_bearer could cause intermittent auth failures with certain HTTP clients.",
+  "confidence": "high"
+}

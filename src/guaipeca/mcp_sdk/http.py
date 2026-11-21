@@ -68,8 +68,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = [
     "DEFAULT_MAX_BODY_SIZE",
     "TransportSecuritySettings",
+    "_HmacTokenVerifier",
     "_allowed_host_patterns",
     "_allowed_origin_patterns",
+    # Private by naming convention, listed here because the test suite imports
+    # them directly to exercise the Bearer comparison in isolation (#43).
+    "_check_bearer",
     "_security_settings",
     "build_app",
     "serve",
@@ -257,8 +261,25 @@ def _check_bearer(request: Any, auth_token: str | None) -> bool:
         expected = auth_token.encode("utf-8")
     except UnicodeEncodeError:
         return False
-    # ``surrogateescape`` keeps a presented token that cannot round-trip
-    # through latin-1 from raising; it simply will not match.
+    # ``surrogateescape`` here rescues lone surrogates only - the ones a token
+    # set under a non-UTF-8 locale can carry. It does NOT make an arbitrary
+    # non-latin-1 character safe: "don\u2019t".encode("latin-1",
+    # "surrogateescape") raises. In practice the presented side never exceeds
+    # U+00FF, because Starlette decodes header bytes as latin-1, so this cannot
+    # raise from a real request - but the protection is the decode, not this
+    # error handler.
+    #
+    # Residual, documented rather than "fixed" (#43): ``compare_digest`` returns
+    # early when the lengths differ, so timing could in principle distinguish a
+    # wrong-length token from a wrong-value one. Measured here at ~25ns
+    # (0.110us equal-length vs 0.084us empty, ~1/400,000th of a LAN RTT), masked
+    # by network jitter.
+    #
+    # Hashing both sides to a fixed 32 bytes WOULD close that gate - two SHA-256
+    # digests are always the same length, so the early return never fires. It
+    # costs one digest per request. Deliberately not done here: the measured
+    # magnitude does not justify it, and this should fold into a change that
+    # rewrites the comparison wholesale rather than sitting alone.
     return hmac.compare_digest(
         header[7:].encode("latin-1", "surrogateescape"),
         expected,

@@ -1,0 +1,89 @@
+{
+  "decision": "REQUEST_CHANGES",
+  "summary": {
+    "total_findings": 11,
+    "p0_count": 1,
+    "p1_count": 2,
+    "p2_count": 5,
+    "false_claims": 1
+  },
+  "critical_issues": [
+    {
+      "id": "SEC-EMPTY-TOKEN",
+      "source_roles": ["E1", "S2"],
+      "description": "Empty-string auth_token passes all validation (falsy check at config.py:358 skips latin-1 gate, `if not auth_token: return True` at http.py:239 grants access). Any Bearer value authenticates successfully, silently disabling auth. Should reject empty string explicitly.",
+      "severity": "P0",
+      "action": "Add empty-string rejection in _validate_types: `if self.server.auth_token == '': raise ValueError('auth_token must not be empty')`"
+    }
+  ],
+  "important_issues": [
+    {
+      "id": "DOC-43-RATIONALE",
+      "source_roles": ["CR1"],
+      "description": "The U+00FF rejection rationale is factually wrong. Comments/README claim a token above U+00FF 'could never be presented' and would 'fail every request with 401'. Verified: UTF-8-encoded CJK/emoji secrets authenticate successfully through _check_bearer and _HmacTokenVerifier (client sends UTF-8 header bytes, server re-encodes secret as UTF-8 for comparison). The rejection is correct (it's the issue's decision) but the reason should be restated: the goal is restricting to the Starlette-decoded header charset range, not that non-ASCII secrets don't work.",
+      "severity": "P1",
+      "action": "Restate rationale: 'reject tokens outside U+00FF to match Starlette header decoding range' instead of 'could never authenticate'."
+    },
+    {
+      "id": "CMD-STATUS-KEYERROR",
+      "source_roles": ["C1"],
+      "description": "cmd_status non-JSON text path accesses status['corpora'], status['embedding_model'], etc. without error handling. If status were refactored to return an error dict, JSON path (_emit) handles it but text path crashes with KeyError. Latent divergence between paths.",
+      "severity": "P1",
+      "action": "Add error dict check in text path before accessing status keys, or ensure _emit is called for both paths."
+    }
+  ],
+  "minor_issues": [
+    {
+      "id": "AUTH-BEARER-STRIP",
+      "source_roles": ["C3"],
+      "description": "_check_bearer does header[7:] without stripping. 'Bearer  token' (double space), trailing space, or tab produce mismatch for valid token. Strict prefix match only.",
+      "severity": "P2",
+      "action": "Add .strip() after header[7:] or document as strict contract."
+    },
+    {
+      "id": "DOC-LATIN1-ONLY-UTF8",
+      "source_roles": ["CR2"],
+      "description": "README says 'token must be representable in Latin-1' and test docstring says Latin-1 tokens 'can match', but a Latin-1 non-ASCII token only matches when the client sends UTF-8 wire bytes; it FAILS against latin-1-encoding clients. Only ASCII is universally safe.",
+      "severity": "P2",
+      "action": "Document that non-ASCII Latin-1 tokens require UTF-8 wire encoding; recommend ASCII for maximum compatibility."
+    },
+    {
+      "id": "EXCEPTION-CHAIN",
+      "source_roles": ["C4"],
+      "description": "'from None' on the ValueError (config.py:368) strips the UnicodeEncodeError chain, hiding root cause in production traceback.",
+      "severity": "P2",
+      "action": "Use 'from e' or omit from None to preserve the chain."
+    },
+    {
+      "id": "AUTH-WHITESPACE",
+      "source_roles": ["S2"],
+      "description": "Whitespace-only auth_token (e.g. '   ') passes validation (truthy, latin-1 encodable) and can authenticate if a Bearer header contains the identical whitespace. Practically unusable but technically a silent auth bypass.",
+      "severity": "P2",
+      "action": "Consider rejecting whitespace-only tokens in validation."
+    },
+    {
+      "id": "TEST-GAP",
+      "source_roles": ["CR3", "CR4"],
+      "description": "test_status_json_error_exits_1_empty_stdout exercises an error payload Searcher.status cannot produce (real failure is an exception in the property). No test covers the GUAIPECA_AUTH_TOKEN env-var override path for charset rejection (though reference_checker confirms it IS covered by from_yaml -> env override -> _validate_types ordering).",
+      "severity": "P2",
+      "action": "Add env-var override charset test; consider testing actual Searcher.status exception path."
+    }
+  ],
+  "verified_good": [
+    "Empty token matches any Bearer — VERIFIED via _check_bearer implementation (if not auth_token: return True)",
+    "_emit does NOT crash on non-dict — VERIFIED: json.dumps(None) → 'null', json.dumps(list) works fine (Edge Hunter E4 claim is FALSE)",
+    "_check_bearer header[7:] without strip — VERIFIED: 'Bearer  token'[7:] = ' token' ≠ 'token'",
+    "from None strips exception chain — VERIFIED: Python semantics confirmed",
+    "Latin-1 non-ASCII token only matches UTF-8 wire — VERIFIED: _check_bearer encodes header as latin-1, secret as UTF-8",
+    "GUAIPECA_AUTH_TOKEN env override IS covered by validation — VERIFIED: env_token set at config.py:268, _validate_types at line 310",
+    "cmd_status text path has KeyError risk — VERIFIED: status['corpora'] accessed without error guard in text path",
+    "U+00FF rejection at from_yaml — VERIFIED: _validate_types checks auth_token before use",
+    "Byte-identical default output — VERIFIED: confirmed by reference checker",
+    "Error contract (exit 1, stderr, empty stdout) — VERIFIED: _emit handles this correctly",
+    "JSON parity with MCP — VERIFIED: _print_json uses same json.dumps as MCP",
+    "__all__ sorted — VERIFIED: RUF022-sorted, ruff-clean",
+    "compare_digest length gate documented and acceptable — VERIFIED; note: challenger C2's claim that hashing would not remove the gate is INCORRECT (SHA-256 produces fixed 32-byte output, compare_digest would not short-circuit), but the overall assessment that it's documented and acceptable stands"
+  ],
+  "overall_assessment": "The PR (features #42 and #43) is well-executed with comprehensive test coverage and correct core behavior. The U+00FF rejection works as intended, --json flags are properly implemented across all three commands, byte-identical default output is maintained, and error contracts are respected. The critical blocker is an empty-string auth_token that silently disables authentication — any Bearer value authenticates successfully. This is a P0 security issue that must be fixed before merge. Two P1 issues (misleading U+00FF rationale, cmd_status text path KeyError risk) should also be addressed. Five P2 findings (Bearer header strip, Latin-1 wire documentation, exception chain, whitespace token, test gaps) can be deferred or handled in follow-up.",
+  "recommendation": "Fix the empty auth_token vulnerability (P0) and restate the U+00FF rationale (P1) before merge. The cmd_status text path guard (P1) should be fixed in the same PR. Remaining P2 issues can be tracked as follow-ups."
+}
