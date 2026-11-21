@@ -202,6 +202,24 @@ def _emit(result: dict) -> None:
     _print_json(result)
 
 
+def _corpus_errors(result: dict) -> list[str]:
+    """Per-corpus error strings inside an aggregated index result.
+
+    ``index_corpus("all")`` returns ``{"corpora": [...]}`` and each entry may
+    carry ``error`` (lock contention, unusable lock file). Those are real
+    failures, but they sit below the top-level key ``_emit`` inspects, so a run
+    whose corpus was skipped for a lock reported success in both output modes.
+    Returned rather than printed so the JSON and human paths cannot drift apart.
+    """
+    if not isinstance(result, dict):
+        return []
+    return [
+        str(entry["error"])
+        for entry in result.get("corpora") or []
+        if isinstance(entry, dict) and entry.get("error")
+    ]
+
+
 def _print_index_stats(stats: dict) -> None:
     """Print one corpus's index stats (per-corpus dict shape)."""
     print(f"\n[{stats['corpus']}]")
@@ -251,6 +269,15 @@ def cmd_index(args):
 
     _, _, searcher = _create_services(config)
     result = searcher.index_corpus(corpus_name=corpus, force=args.force)
+
+    # A per-corpus failure inside an aggregated result is a failure, not a
+    # partial success: check it before either output path so they agree.
+    per_corpus_errors = _corpus_errors(result)
+    if per_corpus_errors:
+        for message in per_corpus_errors:
+            print(f"Error: {message}", file=sys.stderr)
+        print(f"Error: {len(per_corpus_errors)} corpus(es) were not indexed", file=sys.stderr)
+        sys.exit(1)
 
     if args.json:
         # The sample-config (exit 2) and missing-corpus (exit 1) guards above

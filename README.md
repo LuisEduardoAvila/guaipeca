@@ -392,9 +392,13 @@ CLI-only). The read/upload/delete commands (`get-chunk`, `get-document`,
 `list-documents`, `list-folders`, `get-toc`, `upload`, `delete`) print the
 same JSON payloads the MCP server returns by default. The three most-scripted
 commands — `search`, `status`, and `index` — print human-readable text by
-default and accept `--json` to print the same JSON payload instead; on an
+default and accept `--json` to print the same JSON payload instead. On an
 error payload they exit 1, write to stderr, and leave stdout empty, so the
-output is safe to pipe into `jq`. `guaipeca search` accepts the same knobs as
+output is safe to pipe into `jq`. For `index` that covers a corpus that could
+not be indexed (a lock held by another process): the run exits 1 rather than
+reporting a partial success. Two config guards run before any JSON is produced
+and keep their own exit codes — an unmodified sample config exits 2, a
+nonexistent corpus path exits 1 — both with plain-text stderr. `guaipeca search` accepts the same knobs as
 the MCP `search` tool: `--return-mode`, `--max-chars`, `--section-mode`, and
 `--section-filter` (in addition to `--top-k`, `--corpora`, and `--hybrid`). A
 parity test (`tests/test_cli_mcp_parity.py`) fails if the two surfaces drift
@@ -595,11 +599,14 @@ Push to `main` triggers a GitHub Actions workflow that:
 - **Authentication:** Set `auth_token` in the server config to require
   `Authorization: Bearer <token>` headers on HTTP requests. When auth is enabled,
   CORS is restricted (no wildcard origin).
-  The token must be representable in Latin-1 (printable ASCII is the safe
-  choice): HTTP headers are decoded as Latin-1, so a secret containing
-  characters above U+00FF — CJK, emoji — could never be presented and would
-  fail every request with a 401. Such a token is rejected when the config is
-  loaded, not at request time.
+  Use printable ASCII. Non-ASCII tokens are client-dependent: the server
+  compares the Bearer value's wire bytes against the UTF-8 encoding of the
+  secret, so a client that sends UTF-8 header bytes works, while one that
+  encodes the header as Latin-1 gets a permanent silent 401 — and there is no
+  way to tell which your clients do. Control characters are also rejected:
+  they cannot legally appear in an HTTP header value. Both are caught when the
+  config is loaded, not at request time. An empty `auth_token` is rejected too
+  — remove the key entirely to run without authentication.
 - **Origin validation (DNS-rebinding protection):** browser requests carry an
   `Origin` header, and incoming requests with an unrecognised origin are
   rejected with `403 Forbidden` before the auth check. By default only loopback

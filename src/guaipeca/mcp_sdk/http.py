@@ -261,17 +261,25 @@ def _check_bearer(request: Any, auth_token: str | None) -> bool:
         expected = auth_token.encode("utf-8")
     except UnicodeEncodeError:
         return False
-    # ``surrogateescape`` keeps a presented token that cannot round-trip
-    # through latin-1 from raising; it simply will not match.
+    # ``surrogateescape`` here rescues lone surrogates only - the ones a token
+    # set under a non-UTF-8 locale can carry. It does NOT make an arbitrary
+    # non-latin-1 character safe: "don\u2019t".encode("latin-1",
+    # "surrogateescape") raises. In practice the presented side never exceeds
+    # U+00FF, because Starlette decodes header bytes as latin-1, so this cannot
+    # raise from a real request - but the protection is the decode, not this
+    # error handler.
     #
     # Residual, documented rather than "fixed" (#43): ``compare_digest`` returns
     # early when the lengths differ, so timing could in principle distinguish a
     # wrong-length token from a wrong-value one. Measured here at ~25ns
-    # (0.110us equal-length vs 0.084us empty, ~1/400,000th of a LAN RTT), and
-    # masked entirely by network jitter. Hashing both sides to a fixed 32 bytes
-    # would not remove it either - the hash is computed before the comparison,
-    # so the gate would merely move - and it would cost a digest per request.
-    # Fold this into a change that rewrites the comparison wholesale, not alone.
+    # (0.110us equal-length vs 0.084us empty, ~1/400,000th of a LAN RTT), masked
+    # by network jitter.
+    #
+    # Hashing both sides to a fixed 32 bytes WOULD close that gate - two SHA-256
+    # digests are always the same length, so the early return never fires. It
+    # costs one digest per request. Deliberately not done here: the measured
+    # magnitude does not justify it, and this should fold into a change that
+    # rewrites the comparison wholesale rather than sitting alone.
     return hmac.compare_digest(
         header[7:].encode("latin-1", "surrogateescape"),
         expected,

@@ -58,3 +58,15 @@ def test_absent_auth_token_still_means_auth_off(tmp_path):
 def test_real_token_still_accepted(tmp_path):
     cfg = _load(tmp_path, 'server:\n  auth_token: "a-real-token"\n')
     assert cfg.server.auth_token == "a-real-token"
+
+
+def test_control_character_token_is_rejected(tmp_path):
+    """A token with a newline cannot appear in a header, so it could never work (#43)."""
+    with pytest.raises(ValueError, match="control characters"):
+        _load(tmp_path, 'server:\n  auth_token: "a\\nb"\n')
+
+
+def test_printable_ascii_still_accepted(tmp_path):
+    """The rejection must not catch ordinary tokens."""
+    cfg = _load(tmp_path, 'server:\n  auth_token: "a-B_c.123"\n')
+    assert cfg.server.auth_token == "a-B_c.123"

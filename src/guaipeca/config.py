@@ -365,21 +365,34 @@ class GuaipecaConfig:
                 "authentication while appearing to enable it. Remove the "
                 "auth_token key entirely to run without authentication."
             )
-        # Starlette decodes request headers as latin-1, so a presented Bearer
-        # token can only ever contain U+0000-U+00FF. A secret above that range
-        # could never match any request, and the operator would see a permanent
-        # 401 with no diagnostic (#43). Reject it here, where it is actionable.
+        # Non-ASCII token carriage is client-dependent, and that is the reason
+        # for this gate (#43). The comparison encodes the secret as UTF-8, so a
+        # client that sends UTF-8 header bytes CAN authenticate with a secret
+        # above U+00FF - this is not a hard protocol limit. But clients that
+        # encode the header as latin-1 (Python's http.client, some proxies) send
+        # different bytes and get a permanent silent 401, and the operator has
+        # no way to tell which kind their client is. Restricting to ASCII makes
+        # the token portable; anything else is a trap waiting for a client swap.
+        #
+        # Control characters are rejected for the same reason from the other
+        # direction: they encode fine but cannot legally appear in an HTTP field
+        # value, so the token could never be presented at all.
         if self.server.auth_token:
             try:
                 self.server.auth_token.encode("latin-1")
             except UnicodeEncodeError:
                 raise ValueError(
-                    "server.auth_token contains characters above U+00FF, which "
-                    "a Bearer header cannot carry (headers are decoded as "
-                    "latin-1). Such a token could never authenticate and every "
-                    "request would get a silent 401. Use printable ASCII, or "
-                    "Latin-1 characters at most."
+                    "server.auth_token contains characters above U+00FF. Those "
+                    "only authenticate with clients that send UTF-8 header "
+                    "bytes; latin-1 clients would get a permanent silent 401. "
+                    "Use printable ASCII."
                 ) from None
+            if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in self.server.auth_token):
+                raise ValueError(
+                    "server.auth_token contains control characters, which cannot "
+                    "appear in an HTTP header value; such a token could never be "
+                    "presented. Use printable ASCII."
+                )
         if not isinstance(self.server.max_body_size, int) or self.server.max_body_size < 1:
             raise ValueError(f"server.max_body_size must be a positive integer, got: {self.server.max_body_size!r}")
         if self.server.transport == "sse":
