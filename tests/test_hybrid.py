@@ -354,8 +354,6 @@ class TestBM25IndexLifecycle:
         """Force re-index should rebuild BM25 index."""
         searcher = force_reindexed_corpus
         # The session fixture performed the forced rebuild; BM25 must survive it.
-
-        # BM25 should still be available after force re-index
         corpus_idx = searcher.corpora["test-docs"]
         with corpus_idx._rwlock.read_lock():
             corpus_idx._load()

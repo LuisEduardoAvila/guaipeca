@@ -142,22 +142,56 @@ def indexed_corpus(searcher):
     return searcher
 
 
+def _index_built(index_dir: Path) -> bool:
+    """True when a completed forced rebuild is already on disk.
+
+    Both the primary and its one-generation backup must exist and be non-empty:
+    ``_save`` only writes the backup when a primary was already there
+    (``src/guaipeca/index.py:687``), so a backup is the marker of a *second*
+    successful build — which is exactly the state ``force_reindexed_corpus``
+    promises. A zero-byte primary means a build was interrupted.
+    """
+    primary = index_dir / "faiss_index.fai"
+    backup = index_dir / "faiss_index.fai.bak"
+    return (
+        primary.exists()
+        and backup.exists()
+        and primary.stat().st_size > 0
+        and backup.stat().st_size > 0
+    )
+
+
 @pytest.fixture(scope="session")
 def force_reindexed_corpus(indexed_corpus):
-    """``indexed_corpus`` after exactly one forced rebuild, shared by the session.
+    """``indexed_corpus`` after a forced rebuild, shared by the session.
 
     A forced rebuild of the fixture corpus costs ~11 s (181 chunks through
-    FAISS). Sixteen tests in the suite each triggered their own, which is where
-    most of the suite's runtime went (#50). The rebuild is idempotent for tests
-    that only *read* its result — the ``.fai.bak`` it produces, the cache state
-    it clears — so one rebuild serves all of them.
+    FAISS). Eleven call sites in ``test_fmem_port.py`` and two in
+    ``test_hybrid.py`` each triggered their own, which is where most of the
+    suite's runtime went (#50). The rebuild is idempotent for tests that only
+    *read* its result — the ``.fai.bak`` it produces, the cache state it clears
+    — so one rebuild serves all of them.
+
+    The rebuild is **skipped when a completed one is already on disk**. Without
+    this gate every session pays the rebuild up front, including a one-test run
+    that never needed a forced rebuild, which made single-test iteration slower
+    than before #50 (21.5 s -> 29.0 s, measured). The persistent data dir means
+    the cost is paid once per index change rather than once per session.
 
     Tests that mutate the index on disk (corruption, deletion) must NOT use
     this fixture; they need their own throwaway corpus via
     ``isolated_indexed_corpus``, or they poison the shared one for every test
     that runs after.
     """
-    indexed_corpus.index_corpus(corpus_name="test-docs", force=True)
+    corpus_idx = indexed_corpus.corpora["test-docs"]
+    if not _index_built(corpus_idx.index_dir):
+        stats = indexed_corpus.index_corpus(corpus_name="test-docs", force=True)
+        # ``index()`` returns {"error": ...} instead of raising when the lock is
+        # held by another process (src/guaipeca/index.py:916-931). Ignoring that
+        # would leave every dependent test asserting against a stale index while
+        # still reporting green.
+        if "error" in stats:
+            pytest.fail(f"force reindex of 'test-docs' failed: {stats['error']}")
     return indexed_corpus
 
 
@@ -199,7 +233,7 @@ def small_indexed_corpus(embedder, converter, temp_data_dir):
 
 @pytest.fixture
 def isolated_indexed_corpus(force_reindexed_corpus, temp_data_dir):
-    """A ``Searcher`` whose index directory is a *copy* of the built session
+    """A ``Searcher`` whose *index directory* is a copy of the built session
     index, so a test may corrupt or delete it without poisoning the session.
 
     Copying the built index (~1 MB) rather than re-indexing is the whole point:
@@ -207,12 +241,25 @@ def isolated_indexed_corpus(force_reindexed_corpus, temp_data_dir):
     the primary, the one-generation backup and the chunk metadata, so the
     corruption and recovery tests see exactly the state a real deployment has
     after two index runs — real FAISS bytes, not a mock.
+
+    Only the index directory is isolated. The embedder and converter are the
+    session-scoped instances and are shared with every other fixture, so
+    consumers must not call ``index_corpus`` on this Searcher — that would clear
+    and repopulate the shared embedding cache for later tests.
     """
     src_idx = force_reindexed_corpus.corpora["test-docs"].index_dir
     dst_root = Path(temp_data_dir) / "index"
     dst_idx = dst_root / "corpora" / "test-docs"
     dst_idx.parent.mkdir(parents=True)
     shutil.copytree(src_idx, dst_idx)
+
+    # The copy must carry a real backup, or the recovery tests below assert
+    # against an empty index and pass without testing anything.
+    backup = dst_idx / "faiss_index.fai.bak"
+    if not backup.exists() or backup.stat().st_size == 0:
+        pytest.fail(
+            f"no usable .fai.bak at {backup}; cannot exercise backup recovery"
+        )
 
     cfg = GuaipecaConfig.from_yaml(str(TEST_CONFIG))
     cfg.indexing.data_dir = str(dst_root)
