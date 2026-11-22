@@ -631,6 +631,11 @@ def _mcp_trailing_slash(request: Any) -> RedirectResponse:
     return RedirectResponse("/mcp", status_code=308)
 
 
+# Set once the unauthenticated-loopback warning has been emitted, so the two
+# call sites (cmd_serve and build_app) do not each print it.
+_BIND_ANNOUNCED = False
+
+
 def _check_bind_exposure(bind_host: str, auth_token: str | None) -> None:
     """Refuse to start a public bind that has no authentication.
 
@@ -644,11 +649,35 @@ def _check_bind_exposure(bind_host: str, auth_token: str | None) -> None:
     reachable sets an ``auth_token``; one who does not want auth keeps the bind
     on loopback and reaches it through a tunnel.
 
+    A loopback bind with no token is a legitimate configuration (it is the
+    default, and the sensible one on a single-user host), so it is allowed — but
+    it is announced, because "this port needs no credentials" is something the
+    operator should know rather than infer.
+
     Raises:
         ValueError: when ``bind_host`` is not loopback-only and no
             ``auth_token`` is configured.
     """
-    if auth_token or not _is_non_loopback_host(bind_host):
+    _check_bind_exposure_and_announce(bind_host, auth_token, announce=True)
+
+
+def _check_bind_exposure_and_announce(
+    bind_host: str, auth_token: str | None, *, announce: bool
+) -> None:
+    """Body of :func:`_check_bind_exposure`, with announcement made optional.
+
+    ``cmd_serve`` runs the check before constructing the server (so a refusal
+    does not pay for the embedding model), and ``build_app`` runs it again as the
+    last line of defence for callers that build the app directly. The
+    *announcement* must happen once per process, so only the first caller asks
+    for it; the refusal is raised by whichever runs.
+    """
+    if auth_token:
+        return
+    if not _is_non_loopback_host(bind_host):
+        if announce:
+            globals()["_BIND_ANNOUNCED"] = True
+            _announce_unauthenticated_loopback(bind_host)
         return
     raise ValueError(
         f"refusing to serve an unauthenticated public bind: server.host={bind_host!r} "
@@ -660,6 +689,27 @@ def _check_bind_exposure(bind_host: str, auth_token: str | None) -> None:
         "in the config, to require auth. Or set server.host to 127.0.0.1 to "
         "serve this machine only."
     )
+
+
+def _announce_unauthenticated_loopback(bind_host: str) -> None:
+    """Announce that a loopback bind is serving without authentication.
+
+    Not a refusal: loopback-only with no token is the default and is fine on a
+    single-user host. It is stated on every start rather than once, and there is
+    no way to silence it — the day someone widens the bind is the day this line
+    stops being true, and a suppressed warning would not be there to say so.
+
+    Emitted through the logger only. ``cli.main`` installs a stream handler, so
+    the record already reaches stderr (where the operator and journald see it)
+    with the timestamp and level; adding a second ``print`` would say it twice.
+    """
+    message = (
+        f"serving without authentication on {bind_host!r} (loopback only): "
+        "every route is open to anything running on this machine, including "
+        "/download and the upload/delete tools. Set GUAIPECA_AUTH_TOKEN to require "
+        "a Bearer token."
+    )
+    logger.warning(message)
 
 
 def build_app(
@@ -684,7 +734,14 @@ def build_app(
     allowed_origins = getattr(server_config, "allowed_origins", None)
     bind_host = host or getattr(server_config, "host", "127.0.0.1")
 
-    _check_bind_exposure(bind_host, auth_token)
+    # Announce only if nobody has yet: cmd_serve checks before constructing the
+    # server, so in the normal serve path the warning has already been emitted
+    # and this call is the enforcement backstop. Direct build_app() callers
+    # (tests, embedders) still get the announcement.
+    _check_bind_exposure_and_announce(
+        bind_host, auth_token, announce=not _BIND_ANNOUNCED
+    )
+    globals()["_BIND_ANNOUNCED"] = True
 
     srv = build_server(server_instance)
 

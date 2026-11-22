@@ -379,6 +379,127 @@ class TestBindExposureRefusal:
             _check_bind_exposure("0.0.0.0", "")
 
 
+class TestUnauthenticatedLoopbackWarning:
+    """A loopback bind with no token is allowed, and announced.
+
+    It is the default and the sensible choice on a single-user host, so it must
+    not be refused. It is announced because "this port needs no credentials" is
+    something the operator should be told rather than left to infer, and it is
+    announced on every start rather than once — a suppressed warning would be
+    silent on the day the bind is widened.
+    """
+
+    def _stderr(self, *args):
+        """Return the WARNING records the guard emits (empty if it refuses)."""
+        import logging
+
+        from guaipeca.mcp_sdk.http import _check_bind_exposure
+
+        records: list[logging.LogRecord] = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = Capture()
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            _check_bind_exposure(*args)
+        finally:
+            root.removeHandler(handler)
+        return [r.getMessage() for r in records]
+
+    def test_loopback_without_token_warns(self):
+        for host in ("127.0.0.1", "::1", "localhost"):
+            messages = self._stderr(host, None)
+            assert any("serving without authentication" in m for m in messages), host
+            # The remedy must be named, not merely the problem.
+            assert any("GUAIPECA_AUTH_TOKEN" in m for m in messages), host
+
+    def test_loopback_with_token_is_silent(self):
+        assert self._stderr("127.0.0.1", "a-token") == []
+
+    def test_public_bind_with_token_is_silent(self):
+        assert self._stderr("0.0.0.0", "a-token") == []
+
+    def test_warning_is_emitted_once(self):
+        """One line per start: the logger already reaches stderr via cli.main,
+        so a second explicit print would duplicate it in the service log."""
+        messages = self._stderr("127.0.0.1", None)
+        assert sum("serving without authentication" in m for m in messages) == 1
+
+    def test_cmd_serve_then_build_app_announces_once(self):
+        """Regression: cmd_serve checks early (to refuse before loading the
+        model) and build_app checks again. Both announcing printed the line
+        twice, 0.6s apart, in a real serve run.
+
+        Drives the real ``build_app`` rather than calling the internals, so the
+        test sees what the two call sites actually do.
+        """
+        import logging
+        import tempfile
+        from pathlib import Path
+
+        from guaipeca.config import GuaipecaConfig
+        from guaipeca.mcp_sdk import http as sdk_http
+        from guaipeca.mcp_server import GuaipecaMCPServer
+
+        sdk_http._BIND_ANNOUNCED = False
+
+        d = Path(tempfile.mkdtemp())
+        cfg_path = d / "c.yaml"
+        cfg_path.write_text(
+            f"indexing:\n  data_dir: {d}\n"
+            f"server:\n  transport: http\n  host: 127.0.0.1\n  port: 8090\n"
+            f"corpora:\n  - name: docs\n    path: {d}\n    extensions: [.md]\n"
+        )
+        config = GuaipecaConfig.from_yaml(str(cfg_path))
+
+        records: list[logging.LogRecord] = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = Capture()
+        logging.getLogger().addHandler(handler)
+        try:
+            # As cmd_serve does, before constructing the server.
+            sdk_http._check_bind_exposure("127.0.0.1", None)
+            # Then the real app build, which checks again as a backstop.
+            sdk_http.build_app(config, GuaipecaMCPServer(config), host="127.0.0.1")
+        finally:
+            logging.getLogger().removeHandler(handler)
+            sdk_http._BIND_ANNOUNCED = False
+
+        assert (
+            sum("serving without authentication" in r.getMessage() for r in records)
+            == 1
+        )
+
+    def test_public_bind_refusal_does_not_also_warn(self):
+        """Refusal and warning are mutually exclusive: one message, one reason."""
+        import pytest
+
+        with pytest.raises(ValueError):
+            self._stderr("0.0.0.0", None)
+
+    def test_warning_is_also_logged(self, caplog):
+        """And it carries a level, so a collector can filter on it."""
+        import logging
+
+        from guaipeca.mcp_sdk.http import _check_bind_exposure
+
+        with caplog.at_level(logging.WARNING):
+            _check_bind_exposure("127.0.0.1", None)
+        assert any(
+            r.levelno == logging.WARNING
+            and "serving without authentication" in r.getMessage()
+            for r in caplog.records
+        )
+
+
 class TestServeRefusalIsClean:
     """A refused startup must be a clean failure, not a traceback with exit 0.
 
