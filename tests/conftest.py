@@ -142,6 +142,25 @@ def indexed_corpus(searcher):
     return searcher
 
 
+@pytest.fixture(scope="session")
+def force_reindexed_corpus(indexed_corpus):
+    """``indexed_corpus`` after exactly one forced rebuild, shared by the session.
+
+    A forced rebuild of the fixture corpus costs ~11 s (181 chunks through
+    FAISS). Sixteen tests in the suite each triggered their own, which is where
+    most of the suite's runtime went (#50). The rebuild is idempotent for tests
+    that only *read* its result — the ``.fai.bak`` it produces, the cache state
+    it clears — so one rebuild serves all of them.
+
+    Tests that mutate the index on disk (corruption, deletion) must NOT use
+    this fixture; they need their own throwaway corpus via
+    ``isolated_indexed_corpus``, or they poison the shared one for every test
+    that runs after.
+    """
+    indexed_corpus.index_corpus(corpus_name="test-docs", force=True)
+    return indexed_corpus
+
+
 # ---- Temp dir for isolated tests ----
 
 @pytest.fixture
@@ -150,3 +169,56 @@ def temp_data_dir():
     d = tempfile.mkdtemp(prefix="guaipeca-test-")
     yield d
     shutil.rmtree(d, ignore_errors=True)
+
+
+@pytest.fixture
+def small_indexed_corpus(embedder, converter, temp_data_dir):
+    """A ``Searcher`` over one small markdown file — three-ish chunks.
+
+    For tests whose assertion is about *behaviour* (a cache cleared, a flag
+    set, a call made) rather than about a realistic corpus. A rebuild here costs
+    a fraction of a second instead of ~11 s (#50).
+    """
+    doc_dir = Path(temp_data_dir) / "docs"
+    doc_dir.mkdir()
+    (doc_dir / "small.md").write_text(
+        "# Small Doc\n\n"
+        "## First Section\n\nAlpha content about consolidation and retrieval.\n\n"
+        "## Second Section\n\nBeta content about indexing and chunking.\n",
+        encoding="utf-8",
+    )
+
+    cfg = GuaipecaConfig.from_yaml(str(TEST_CONFIG))
+    cfg.corpora[0].path = str(doc_dir)
+    cfg.indexing.data_dir = str(Path(temp_data_dir) / "index")
+
+    s = Searcher(config=cfg, embedding_service=embedder, converter=converter)
+    s.index_corpus(corpus_name="test-docs", force=True)
+    return s
+
+
+@pytest.fixture
+def isolated_indexed_corpus(force_reindexed_corpus, temp_data_dir):
+    """A ``Searcher`` whose index directory is a *copy* of the built session
+    index, so a test may corrupt or delete it without poisoning the session.
+
+    Copying the built index (~1 MB) rather than re-indexing is the whole point:
+    a rebuild costs ~11 s per test, which is what #50 is about. The copy carries
+    the primary, the one-generation backup and the chunk metadata, so the
+    corruption and recovery tests see exactly the state a real deployment has
+    after two index runs — real FAISS bytes, not a mock.
+    """
+    src_idx = force_reindexed_corpus.corpora["test-docs"].index_dir
+    dst_root = Path(temp_data_dir) / "index"
+    dst_idx = dst_root / "corpora" / "test-docs"
+    dst_idx.parent.mkdir(parents=True)
+    shutil.copytree(src_idx, dst_idx)
+
+    cfg = GuaipecaConfig.from_yaml(str(TEST_CONFIG))
+    cfg.indexing.data_dir = str(dst_root)
+
+    return Searcher(
+        config=cfg,
+        embedding_service=force_reindexed_corpus.embedder,
+        converter=force_reindexed_corpus.converter,
+    )

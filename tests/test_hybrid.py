@@ -350,11 +350,10 @@ class TestMCPSearchTool:
 class TestBM25IndexLifecycle:
     """Test BM25 index lifecycle (build, save, load, reset)."""
 
-    def test_bm25_index_resets_on_force(self, indexed_corpus):
+    def test_bm25_index_resets_on_force(self, force_reindexed_corpus):
         """Force re-index should rebuild BM25 index."""
-        searcher = indexed_corpus
-        stats = searcher.index_corpus(corpus_name="test-docs", force=True)
-        assert "error" not in stats
+        searcher = force_reindexed_corpus
+        # The session fixture performed the forced rebuild; BM25 must survive it.
 
         # BM25 should still be available after force re-index
         corpus_idx = searcher.corpora["test-docs"]
@@ -362,11 +361,9 @@ class TestBM25IndexLifecycle:
             corpus_idx._load()
             assert corpus_idx._bm25_retriever is not None, "BM25 retriever not available after force re-index"
 
-    def test_bm25_search_after_force_reindex(self, indexed_corpus):
+    def test_bm25_search_after_force_reindex(self, force_reindexed_corpus):
         """BM25 search should work after force re-index."""
-        searcher = indexed_corpus
-        searcher.index_corpus(corpus_name="test-docs", force=True)
-
+        searcher = force_reindexed_corpus
         corpus_idx = searcher.corpora["test-docs"]
         results = corpus_idx.search_bm25("consolidation", top_k=5)
         assert len(results) > 0, "No BM25 results after force re-index"
