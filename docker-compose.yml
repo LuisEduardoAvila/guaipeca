@@ -19,6 +19,11 @@ services:
       - ./data:/data
     environment:
       - GUAIPECA_CONFIG=/data/config/guaipeca.yaml
+      # Required: server.host is 0.0.0.0 so the port can be mapped, and the
+      # server refuses to start without auth. Set the token in the shell or a
+      # .env file next to this compose file; never commit it here.
+      #   GUAIPECA_AUTH_TOKEN=<your-token>
+      - GUAIPECA_AUTH_TOKEN=${GUAIPECA_AUTH_TOKEN:?set GUAIPECA_AUTH_TOKEN before starting}
     healthcheck:
       # Sends the Bearer token when server.auth_token is configured; without it
       # this reports a working server as unhealthy. See docker-healthcheck.py.

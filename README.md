@@ -89,16 +89,16 @@ guaipeca serve              # MCP server on port 8090
 mkdir -p data/{config,corpora,index,models}
 cp config/guaipeca.container.yaml data/config/guaipeca.yaml
 # The container config binds 0.0.0.0 so the port can be mapped, which requires
-# auth: it ships with a placeholder token. Change it before exposing the port:
-#   edit data/config/guaipeca.yaml -> server.auth_token
-# (or drop that key and set GUAIPECA_AUTH_TOKEN in your compose environment)
+# auth. Supply the token through the environment, not the config file:
+export GUAIPECA_AUTH_TOKEN="$(openssl rand -base64 32)"
+# docker compose refuses to start without it, and names the variable if missing.
 
 # 2. Put your documents in data/corpora/<corpus-name>/
 #    The container config defines one corpus named epm-docs, so:
 #    data/corpora/epm-docs/yourfile.pdf
 #    NOT directly in data/corpora/ - files one level up match no corpus.
 
-# 3. Start the container
+# 3. Start the container (GUAIPECA_AUTH_TOKEN must be set, see step 1)
 docker compose up -d
 
 # 4. Check health

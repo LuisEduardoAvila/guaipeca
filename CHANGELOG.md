@@ -15,10 +15,13 @@ Notable changes to Guaipeca. Format loosely follows
   client that could route to the host (#53). There is no override flag; set a
   token, or keep the bind on `127.0.0.1`. The default bind was already
   `127.0.0.1`, so only configurations that opt into a wider bind are affected.
-- **The container sample ships with `auth_token` set.** `config/guaipeca.container.yaml`
-  binds `0.0.0.0` for port mapping, so it now carries a placeholder token
-  (`change-me-before-exposing`) and the README says to change it. Previously the
-  token line was commented out and the README called it optional.
+- **The container token comes from the environment.** `config/guaipeca.container.yaml`
+  binds `0.0.0.0` for port mapping, which requires auth, so the token is supplied
+  as `GUAIPECA_AUTH_TOKEN` rather than written into the config file. The sample
+  carries no token key at all — a placeholder that works as a real credential is
+  worse than none, because it looks configured — and `docker-compose.yml`
+  declares the variable as required, so compose refuses to start with a message
+  naming it. The README quick start exports a generated token before starting.
 
 ### Fixed
 

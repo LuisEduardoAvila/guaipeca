@@ -61,10 +61,11 @@ server:
   host: 0.0.0.0                  # REQUIRED for container port mapping: binds all
                                 # interfaces, so every route is network-reachable.
   # A token is REQUIRED when host is not 127.0.0.1: the server refuses to start
-  # without one. Change this value before exposing the port beyond your host.
-  # For a secret you would rather not keep in this file, leave this unset and
-  # set the GUAIPECA_AUTH_TOKEN environment variable instead.
-  auth_token: "change-me-before-exposing"
+  # without one. Supply it through the environment, not this file, so the
+  # secret stays out of anything you copy or commit:
+  #   GUAIPECA_AUTH_TOKEN=<your-token> docker compose up -d
+  # or set it in a .env file next to docker-compose.yml. The environment value
+  # takes precedence over this key, so there is no need to add one here.
 
 # Upload configuration (MCP file ingestion)
 upload:

@@ -655,9 +655,10 @@ def _check_bind_exposure(bind_host: str, auth_token: str | None) -> None:
         "is not loopback-only and no server.auth_token is configured.\n"
         "Every route would be reachable without authentication, including "
         "/download and the upload/delete tools.\n"
-        "Set server.auth_token (or the GUAIPECA_AUTH_TOKEN environment "
-        "variable) to require auth, or set server.host to 127.0.0.1 to serve "
-        "this machine only."
+        "Set GUAIPECA_AUTH_TOKEN in the service environment (recommended - "
+        "it keeps the secret out of the config file), or set server.auth_token "
+        "in the config, to require auth. Or set server.host to 127.0.0.1 to "
+        "serve this machine only."
     )
 
 
