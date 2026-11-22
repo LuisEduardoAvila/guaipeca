@@ -377,3 +377,51 @@ class TestBindExposureRefusal:
 
         with pytest.raises(ValueError):
             _check_bind_exposure("0.0.0.0", "")
+
+
+class TestServeRefusalIsClean:
+    """A refused startup must be a clean failure, not a traceback with exit 0.
+
+    Regression guard: the first implementation raised through `server.run()`,
+    which surfaced a 20-line traceback and still exited 0 — a unit file or
+    script checking the status saw success.
+    """
+
+    def test_cmd_serve_exits_nonzero_with_one_clean_error(self, tmp_path, capsys):
+        import pytest
+
+        from guaipeca import cli
+
+        # Minimal config: public bind, no token. Written directly rather than
+        # copied from the sample so this test does not depend on docs.
+        config_path = tmp_path / "guaipeca.yaml"
+        config_path.write_text(
+            f"""indexing:
+  data_dir: {tmp_path}
+server:
+  transport: http
+  host: 0.0.0.0
+  port: 8090
+corpora:
+  - name: docs
+    path: {tmp_path}
+    extensions: [.md]
+"""
+        )
+
+        args = type(
+            "Args", (), {"config": str(config_path), "transport": "http", "port": 18095}
+        )()
+
+        with pytest.raises(SystemExit) as excinfo:
+            cli.cmd_serve(args)
+
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "refusing to serve" in err
+        # The message must name the offending value and both remedies.
+        assert "0.0.0.0" in err
+        assert "auth_token" in err
+        assert "127.0.0.1" in err
+        # No traceback: a deliberate refusal is not a crash.
+        assert "Traceback" not in err
