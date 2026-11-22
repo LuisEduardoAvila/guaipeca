@@ -472,26 +472,21 @@ def cmd_serve(args):
 
     # Refuse a public bind with no auth before doing any expensive setup: the
     # server constructor loads the embedding model (~3s), which is wasted work
-    # when the process is about to exit.
+    # when the process is about to exit. The check only applies to transports
+    # that actually open a socket: stdio talks over stdin/stdout, so a
+    # non-loopback host there exposes nothing and must not block startup.
     from .mcp_sdk.http import _check_bind_exposure
     from .mcp_server import GuaipecaMCPServer
 
-    try:
-        _check_bind_exposure(host, config.server.auth_token)
-    except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
+    if transport in ("http", "both"):
+        try:
+            _check_bind_exposure(host, config.server.auth_token)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     server = GuaipecaMCPServer(config)
-    try:
-        server.run(transport=transport, host=host, port=port)
-    except ValueError as exc:
-        # A refused startup is a decision, not a crash: report it on one line
-        # with a non-zero status so a unit file or script sees the failure.
-        if "refusing to serve" not in str(exc):
-            raise
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
+    server.run(transport=transport, host=host, port=port)
 
 
 def cmd_get_chunk(args):

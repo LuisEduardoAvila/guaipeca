@@ -1,13 +1,21 @@
 #!/opt/venv/bin/python
 """Container health probe for Guaipeca.
 
-``/health`` requires a Bearer token whenever ``server.auth_token`` is set in the
-config, so a probe that omits it reports a healthy server as failing. That was a
-real bug: enabling auth turned every container unhealthy while the app served
-normally.
+``/health`` requires a Bearer token whenever ``server.auth_token`` is set, so a
+probe that omits it reports a healthy server as failing. That was a real bug:
+enabling auth turned every container unhealthy while the app served normally.
 
-The token is read from the same config file the server reads, not from an
-environment variable, so the probe and the server cannot disagree about it.
+The token is resolved the same way the server resolves it, so the probe and the
+server cannot disagree about which token is active:
+
+1. ``GUAIPECA_AUTH_TOKEN`` from the environment, which takes precedence (see
+   ``config.py`` and the container deployment, which supplies the token this
+   way rather than writing it into the config file);
+2. ``server.auth_token`` in the config file, for deployments that keep it there.
+
+Reading only the config file was itself a bug: once the container deployment
+moved the token to the environment, the probe sent no token, ``/health``
+answered 401, and the container was reported unhealthy while serving correctly.
 
 Exit codes: 0 when /health answers 200, 1 otherwise (with a one-line reason on
 stderr so ``docker inspect`` shows something useful).
@@ -26,7 +34,16 @@ HEALTH_URL = os.environ.get("GUAIPECA_HEALTH_URL", "http://localhost:8090/health
 
 
 def _auth_token() -> str | None:
-    """Read server.auth_token from the config, tolerating a missing/broken file."""
+    """Resolve the auth token the way the server does: env var first, then config.
+
+    Returns ``None`` when neither is set. Mirrors ``config.py``, where
+    ``GUAIPECA_AUTH_TOKEN`` overrides ``server.auth_token``, so the probe cannot
+    fail authentication against a server that accepted the same settings.
+    """
+    env_token = os.environ.get("GUAIPECA_AUTH_TOKEN")
+    if env_token and env_token.strip():
+        return env_token
+
     try:
         import yaml
     except ImportError:  # pragma: no cover - pyyaml is a hard dependency

@@ -308,7 +308,7 @@ class TestMalformedRequestNoCrash:
         assert resp.status == 200
 
 class TestNonLoopbackHostDetection:
-    """Tests for the startup warning heuristic (no auth + public bind).
+    """Tests for the loopback-only predicate behind the startup bind refusal.
 
     The helper decides whether a bind is loopback-only; :func:`_check_bind_exposure`
     turns that verdict into a refusal, so this predicate is now load-bearing
@@ -377,6 +377,37 @@ class TestBindExposureRefusal:
 
         with pytest.raises(ValueError):
             _check_bind_exposure("0.0.0.0", "")
+
+    def test_build_app_also_refuses_a_public_bind(self):
+        """The guard in ``build_app`` is a backstop for callers that assemble
+        the app directly, so it needs its own test.
+
+        ``cmd_serve`` checks before constructing the server, which means every
+        CLI-path test keeps passing if this second call site is deleted. The
+        check runs before ``build_server(...)``, so a bare object stands in for
+        the server instance here.
+        """
+        import tempfile
+
+        import pytest
+
+        from guaipeca.config import GuaipecaConfig
+        from guaipeca.mcp_sdk.http import build_app
+
+        d = Path(tempfile.mkdtemp())
+        cfg_path = d / "c.yaml"
+        cfg_path.write_text(
+            f"indexing:\n  data_dir: {d}\n"
+            f"server:\n  transport: http\n  host: 0.0.0.0\n  port: 8090\n"
+            f"corpora:\n  - name: test-docs\n    path: {d}\n",
+            encoding="utf-8",
+        )
+        config = GuaipecaConfig.from_yaml(str(cfg_path))
+        assert config.server.auth_token is None
+
+        with pytest.raises(ValueError) as excinfo:
+            build_app(config, object(), host="0.0.0.0")
+        assert "refusing to serve" in str(excinfo.value)
 
 
 class TestUnauthenticatedLoopbackWarning:

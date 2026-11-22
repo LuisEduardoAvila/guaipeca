@@ -48,9 +48,13 @@ def _is_non_loopback_host(host: str) -> bool:
     treated as safe (not exposing). The wildcard/unspecified addresses
     (0.0.0.0, ::) bind ALL interfaces and therefore DO expose the service and
     return True. Non-IP hostnames (other than ``localhost``) are assumed to
-    expose the service.
+    expose the service: names are not resolved here, so a hostname that would
+    happen to resolve to loopback is still treated as exposing. That is the
+    conservative direction on purpose.
 
-    Used only to decide whether to emit a startup security warning.
+    The verdict is load-bearing: ``mcp_sdk.http._check_bind_exposure`` turns a
+    True result into a refusal to start when no ``auth_token`` is configured,
+    so this is no longer only a warning heuristic.
     """
     import ipaddress
     h = (host or "").strip().lower()
