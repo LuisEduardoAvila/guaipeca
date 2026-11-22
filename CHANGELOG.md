@@ -3,6 +3,29 @@
 Notable changes to Guaipeca. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are semver.
 
+## [Unreleased]
+
+### Changed
+
+- **A public bind without auth is refused, not warned about.** Binding
+  `server.host` to anything other than loopback (`0.0.0.0`, `::`, a LAN address,
+  a hostname) while no `server.auth_token` is configured now raises at startup
+  instead of logging a warning and serving. Every route was reachable — read
+  via `/download`, write and delete via the `upload`/`delete` tools — by any
+  client that could route to the host (#53). There is no override flag; set a
+  token, or keep the bind on `127.0.0.1`. The default bind was already
+  `127.0.0.1`, so only configurations that opt into a wider bind are affected.
+- **The container sample ships with `auth_token` set.** `config/guaipeca.container.yaml`
+  binds `0.0.0.0` for port mapping, so it now carries a placeholder token
+  (`change-me-before-exposing`) and the README says to change it. Previously the
+  token line was commented out and the README called it optional.
+
+### Fixed
+
+- **`config/guaipeca.yaml` and README no longer describe `0.0.0.0` as a plain
+  "network access" toggle.** Both now state that it requires auth and that the
+  server refuses to start otherwise.
+
 ## [0.6.0] — 2026-11-20
 
 Fixes and hardening since 0.5.0. No breaking changes.

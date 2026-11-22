@@ -310,8 +310,9 @@ class TestMalformedRequestNoCrash:
 class TestNonLoopbackHostDetection:
     """Tests for the startup warning heuristic (no auth + public bind).
 
-    The helper only decides whether to log a WARNING — it does not change
-    request handling or auth behavior.
+    The helper decides whether a bind is loopback-only; :func:`_check_bind_exposure`
+    turns that verdict into a refusal, so this predicate is now load-bearing
+    rather than advisory.
     """
 
     def test_loopback_hosts_are_safe(self):
@@ -331,3 +332,48 @@ class TestNonLoopbackHostDetection:
 
         for host in ("192.168.1.10", "10.0.0.5", "example.com", ""):
             assert _is_non_loopback_host(host) is True, host
+
+
+class TestBindExposureRefusal:
+    """An unauthenticated public bind is refused, not merely warned about.
+
+    The route set includes ``/download`` (serves stored documents) and the
+    ``upload``/``delete`` tools (write and remove files), so this combination
+    exposes read, write and delete to anything that can route to the host.
+    """
+
+    def test_loopback_binds_start_without_a_token(self):
+        from guaipeca.mcp_sdk.http import _check_bind_exposure
+
+        for host in ("127.0.0.1", "::1", "localhost"):
+            _check_bind_exposure(host, None)  # must not raise
+
+    def test_public_bind_with_token_is_allowed(self):
+        from guaipeca.mcp_sdk.http import _check_bind_exposure
+
+        for host in ("0.0.0.0", "::", "192.168.1.10"):
+            _check_bind_exposure(host, "a-token")  # must not raise
+
+    def test_public_bind_without_token_is_refused(self):
+        import pytest
+
+        from guaipeca.mcp_sdk.http import _check_bind_exposure
+
+        for host in ("0.0.0.0", "::", "192.168.1.10", "example.com", ""):
+            with pytest.raises(ValueError) as excinfo:
+                _check_bind_exposure(host, None)
+            message = str(excinfo.value)
+            # The error must name both remedies and the offending value.
+            assert "auth_token" in message
+            assert "127.0.0.1" in message
+            assert f"server.host={host!r}" in message
+
+    def test_empty_token_counts_as_no_token(self):
+        """A blank token is not authentication; config validation rejects it
+        earlier, but the guard must not treat '' as configured."""
+        import pytest
+
+        from guaipeca.mcp_sdk.http import _check_bind_exposure
+
+        with pytest.raises(ValueError):
+            _check_bind_exposure("0.0.0.0", "")

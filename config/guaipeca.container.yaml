@@ -58,8 +58,13 @@ indexing:
 server:
   transport: http                # http only in container (no stdio needed); serves Streamable HTTP (POST /mcp) + legacy SSE
   port: 8090                     # MCP HTTP/SSE port
-  host: 0.0.0.0                  # bind to all interfaces for container access
-  # auth_token: "your-secret-token"  # Optional: set to require Bearer token auth
+  host: 0.0.0.0                  # REQUIRED for container port mapping: binds all
+                                # interfaces, so every route is network-reachable.
+  # A token is REQUIRED when host is not 127.0.0.1: the server refuses to start
+  # without one. Change this value before exposing the port beyond your host.
+  # For a secret you would rather not keep in this file, leave this unset and
+  # set the GUAIPECA_AUTH_TOKEN environment variable instead.
+  auth_token: "change-me-before-exposing"
 
 # Upload configuration (MCP file ingestion)
 upload:
