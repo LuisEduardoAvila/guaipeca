@@ -470,7 +470,21 @@ def cmd_serve(args):
     port = args.port or config.server.port
     host = config.server.host
 
+    # Refuse a public bind with no auth before doing any expensive setup: the
+    # server constructor loads the embedding model (~3s), which is wasted work
+    # when the process is about to exit. The check only applies to transports
+    # that actually open a socket: stdio talks over stdin/stdout, so a
+    # non-loopback host there exposes nothing and must not block startup.
+    from .mcp_sdk.http import _check_bind_exposure
     from .mcp_server import GuaipecaMCPServer
+
+    if transport in ("http", "both"):
+        try:
+            _check_bind_exposure(host, config.server.auth_token)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     server = GuaipecaMCPServer(config)
     server.run(transport=transport, host=host, port=port)
 

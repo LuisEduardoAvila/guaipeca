@@ -88,14 +88,17 @@ guaipeca serve              # MCP server on port 8090
 # 1. Prepare data directory (run from the cloned repo: docker-compose.yml lives there)
 mkdir -p data/{config,corpora,index,models}
 cp config/guaipeca.container.yaml data/config/guaipeca.yaml
-# Optionally add a server.auth_token to data/config/guaipeca.yaml first
+# The container config binds 0.0.0.0 so the port can be mapped, which requires
+# auth. Supply the token through the environment, not the config file:
+export GUAIPECA_AUTH_TOKEN="$(openssl rand -base64 32)"
+# docker compose refuses to start without it, and names the variable if missing.
 
 # 2. Put your documents in data/corpora/<corpus-name>/
 #    The container config defines one corpus named epm-docs, so:
 #    data/corpora/epm-docs/yourfile.pdf
 #    NOT directly in data/corpora/ - files one level up match no corpus.
 
-# 3. Start the container
+# 3. Start the container (GUAIPECA_AUTH_TOKEN must be set, see step 1)
 docker compose up -d
 
 # 4. Check health
@@ -142,8 +145,8 @@ chunking:
 server:
   transport: both  # stdio | http | both (see Transports below)
   port: 8090
-  host: 127.0.0.1  # Use 0.0.0.0 for network access
-  # auth_token: "your-secret-token"  # Optional: require Bearer token auth
+  host: 127.0.0.1  # 0.0.0.0 exposes every route to the network
+  # auth_token: "your-secret-token"  # Required if host is not 127.0.0.1
 
 upload:
   allow: ["epm-docs"]  # corpora that accept file uploads
@@ -463,7 +466,9 @@ sudo systemctl disable guaipeca    # stop starting on boot
 
 - The service runs `guaipeca serve` with `--transport http` — stdio is not usable under
   systemd, where the unit has no stdin
-- Port 8090 is bound to `127.0.0.1` by default (config `server.host`). Use `0.0.0.0` for network access
+- Port 8090 is bound to `127.0.0.1` by default (config `server.host`). Setting `0.0.0.0`
+  exposes every route to the network and **requires `server.auth_token`** — the server
+  refuses to start otherwise
 - Resource limits (`MemoryMax`, `CPUQuota`) prevent Guaipeca from starving other services on shared or low-resource hosts
 - The embedding model loads at startup (~1s with fastembed/ONNX). First search/index may take slightly longer if the model needs to download
 - Config changes require a restart: `sudo systemctl restart guaipeca`

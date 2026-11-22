@@ -79,7 +79,8 @@ indexing:
 server:
   transport: both                # stdio | http | both
   port: 8090                     # HTTP port (if http or both)
-  host: 127.0.0.1                # HTTP bind address (use 0.0.0.0 for network access)
+  host: 127.0.0.1                # HTTP bind address. 0.0.0.0 exposes every route
+                                # to the network and REQUIRES auth_token below.
   # auth_token: <your-secret-token>  # Optional: set to require Bearer token auth on HTTP
 
 # Upload configuration (MCP file ingestion)
