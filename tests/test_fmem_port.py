@@ -49,34 +49,28 @@ def _model_available(svc) -> bool:
 class TestFAISSBackup:
     """Test FAISS index backup creation and corruption recovery."""
 
-    def test_backup_created_after_indexing(self, indexed_corpus):
-        """After indexing, a .fai.bak backup file should exist."""
-        searcher = indexed_corpus
+    def test_backup_created_after_indexing(self, isolated_indexed_corpus):
+        """After a forced rebuild, a .fai.bak backup file should exist."""
+        searcher = isolated_indexed_corpus
         corpus_idx = searcher.corpora["test-docs"]
-        # Force a re-index to trigger backup creation
-        searcher.index_corpus(corpus_name="test-docs", force=True)
+        # The fixture's forced index already triggered backup creation
         backup_path = corpus_idx.faiss_path.with_suffix(".fai.bak")
         assert backup_path.exists(), f"FAISS backup file not found at {backup_path}"
 
-    def test_backup_is_valid_faiss(self, indexed_corpus):
+    def test_backup_is_valid_faiss(self, isolated_indexed_corpus):
         """The backup file should be a valid FAISS index."""
         import faiss
-        searcher = indexed_corpus
+        searcher = isolated_indexed_corpus
         corpus_idx = searcher.corpora["test-docs"]
-        searcher.index_corpus(corpus_name="test-docs", force=True)
         backup_path = corpus_idx.faiss_path.with_suffix(".fai.bak")
-        if backup_path.exists():
-            index = faiss.read_index(str(backup_path))
-            assert index.ntotal > 0, "Backup FAISS index has 0 vectors"
+        assert backup_path.exists(), "no backup to validate"
+        index = faiss.read_index(str(backup_path))
+        assert index.ntotal > 0, "Backup FAISS index has 0 vectors"
 
-    def test_recovery_from_corrupted_index(self, indexed_corpus):
+    def test_recovery_from_corrupted_index(self, isolated_indexed_corpus):
         """If the primary .fai file is corrupted, load should fall back to .bak."""
-        import faiss
-        searcher = indexed_corpus
+        searcher = isolated_indexed_corpus
         corpus_idx = searcher.corpora["test-docs"]
-
-        # Ensure we have a valid index and backup
-        searcher.index_corpus(corpus_name="test-docs", force=True)
 
         # Corrupt the primary FAISS index
         with open(corpus_idx.faiss_path, "wb") as f:
@@ -94,14 +88,10 @@ class TestFAISSBackup:
                 "FAISS index not recovered from backup after corruption"
             )
 
-    def test_recovery_from_both_corrupted(self, indexed_corpus):
+    def test_recovery_from_both_corrupted(self, isolated_indexed_corpus):
         """If both .fai and .fai.bak are corrupted, start fresh with empty index."""
-        import faiss
-        searcher = indexed_corpus
+        searcher = isolated_indexed_corpus
         corpus_idx = searcher.corpora["test-docs"]
-
-        # Ensure we have a valid index and backup
-        searcher.index_corpus(corpus_name="test-docs", force=True)
 
         # Corrupt both primary and backup
         with open(corpus_idx.faiss_path, "wb") as f:
@@ -233,11 +223,9 @@ class TestContentPreprocessing:
         svc2 = EmbeddingService(preprocess=False)
         assert svc2.preprocess is False
 
-    def test_search_still_works_with_preprocessing(self, indexed_corpus):
+    def test_search_still_works_with_preprocessing(self, force_reindexed_corpus):
         """Search should still return results with preprocessing enabled."""
-        searcher = indexed_corpus
-        # Re-index to ensure we have valid indexed content
-        searcher.index_corpus(corpus_name="test-docs", force=True)
+        searcher = force_reindexed_corpus
         result = searcher.search("consolidation", top_k=5)
         assert "error" not in result, f"Search error: {result.get('error')}"
         assert result["total"] > 0, "No results with preprocessing enabled"
@@ -420,9 +408,14 @@ class TestEmbeddingServiceCache:
         # Should have at least 1 hit (text1) and 1 miss (text2)
         assert svc.cache_stats["hits"] > initial_hits
 
-    def test_force_reindex_clears_cache(self, indexed_corpus):
-        """Force reindex should clear the embedding cache before re-embedding."""
-        searcher = indexed_corpus
+    def test_force_reindex_clears_cache(self, small_indexed_corpus):
+        """Force reindex should clear the embedding cache before re-embedding.
+
+        Runs against a three-chunk corpus: the assertion is about cache
+        behaviour, not corpus size, and 181 chunks made this cost 22 s for no
+        extra coverage (#50).
+        """
+        searcher = small_indexed_corpus
 
         # Do an initial index to populate cache
         searcher.index_corpus(corpus_name="test-docs", force=True)
@@ -538,28 +531,23 @@ class TestZeroSizeCacheRegression:
 class TestFeaturesIntegration:
     """Test all three features working together."""
 
-    def test_search_works_with_all_features(self, indexed_corpus):
+    def test_search_works_with_all_features(self, force_reindexed_corpus):
         """Search should work with backup, preprocessing, and cache all active."""
-        searcher = indexed_corpus
-        # Force reindex to exercise all features
-        searcher.index_corpus(corpus_name="test-docs", force=True)
-
+        searcher = force_reindexed_corpus
         result = searcher.search("financial consolidation", top_k=5)
         assert "error" not in result
         assert result["total"] > 0
 
-    def test_backup_exists_after_force_reindex(self, indexed_corpus):
+    def test_backup_exists_after_force_reindex(self, force_reindexed_corpus):
         """After force reindex, backup should exist."""
-        searcher = indexed_corpus
-        searcher.index_corpus(corpus_name="test-docs", force=True)
+        searcher = force_reindexed_corpus
         corpus_idx = searcher.corpora["test-docs"]
         backup_path = corpus_idx.faiss_path.with_suffix(".fai.bak")
         assert backup_path.exists()
 
-    def test_cache_populated_after_indexing(self, indexed_corpus):
+    def test_cache_populated_after_indexing(self, force_reindexed_corpus):
         """After indexing, embedding cache should have entries."""
-        searcher = indexed_corpus
-        searcher.index_corpus(corpus_name="test-docs", force=True)
+        searcher = force_reindexed_corpus
         stats = searcher.embedder.cache_stats
         assert stats["size"] > 0
         assert stats["misses"] > 0  # Had to embed during indexing
@@ -581,12 +569,9 @@ class TestFeaturesIntegration:
             "Cache hits should increase on repeated search"
         )
 
-    def test_get_chunk_returns_full_text_not_preprocessed(self, indexed_corpus):
+    def test_get_chunk_returns_full_text_not_preprocessed(self, force_reindexed_corpus):
         """get_chunk should return the full chunk text, not the truncated preprocessing text."""
-        searcher = indexed_corpus
-        # Index with preprocessing
-        searcher.index_corpus(corpus_name="test-docs", force=True)
-
+        searcher = force_reindexed_corpus
         # Search to get a chunk_id
         result = searcher.search("consolidation", top_k=5)
         assert result["total"] > 0
