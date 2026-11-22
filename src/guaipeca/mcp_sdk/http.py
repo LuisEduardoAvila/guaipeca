@@ -3,7 +3,10 @@
 Serves one Starlette app under uvicorn::
 
     /mcp                    Streamable HTTP, both protocol eras
-    /health                 liveness probe (unauthenticated, as before)
+    /health                 liveness probe (unauthenticated only when no
+                            server.auth_token is set - it returns 401 once one
+                            is, see ``_health`` and
+                            tests/test_mcp_sdk_http.py::test_health_requires_auth_when_configured)
     /tools                  tool listing (convenience endpoint)
     /download/{c}/{f}       file download
     DELETE /documents       delete an uploaded file
@@ -52,7 +55,7 @@ from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, RedirectResponse
+from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 from guaipeca import __version__
@@ -126,10 +129,28 @@ def _allowed_origin_patterns(allowed_origins: list[str] | None) -> list[str]:
     """
     if not allowed_origins:
         return list(_LOOPBACK_ORIGIN_PATTERNS)
-    # The old policy ignored a trailing "/". The SDK compares raw strings, so
-    # normalise here; neither form may contain "*", which the SDK would treat
-    # as a port wildcard.
-    return [origin.rstrip("/") for origin in allowed_origins if origin.rstrip("/")]
+    # The old policy ignored a trailing "/". ``_origin_allowed`` compares raw
+    # strings, so normalise here.
+    #
+    # A "*" in an entry is rejected loudly (#37): an operator writing
+    # "https://ui.example/*" means a wildcard, but matching is exact string
+    # comparison, so that entry would never match anything and every browser
+    # client would get 403 with no hint as to why. Failing at startup turns a
+    # silent misconfiguration into an install-time error. A bare "*" is not
+    # special either - there is no wildcard support to grant.
+    patterns: list[str] = []
+    for entry in allowed_origins:
+        normalised = entry.rstrip("/")
+        if not normalised:
+            continue
+        if "*" in normalised:
+            raise ValueError(
+                f"server.allowed_origins entry {entry!r} contains '*'. Origin "
+                f"matching is exact, so a wildcard would never match; list each "
+                f"origin explicitly (including any port)."
+            )
+        patterns.append(normalised)
+    return patterns
 
 
 def _allowed_host_patterns(host: str, allowed_origins: list[str] | None) -> list[str]:
@@ -296,8 +317,15 @@ class _CorsMiddleware:
     Origin policy: a non-empty Origin that fails ``_origin_allowed`` is answered
     with 403 here, before any route runs. A request with no Origin gets ``*``
     when no auth token is configured and ``null`` when one is; a validated
-    Origin is echoed back. Preflights (``OPTIONS``) are NOT answered - see
-    issue #36.
+    Origin is echoed back.
+
+    Every ``Origin`` header must match: a request carrying two, one allowed and
+    one not, is rejected (issue #39). Browsers send at most one, but a proxy or
+    a hand-built request can send several, and the control is all-must-match.
+
+    Preflights are answered here with ``204`` (issue #36). The routes never
+    handle ``OPTIONS``: without this they answered ``405`` carrying an ACAO
+    header, which reads like working CORS while the browser still aborts.
     """
 
     def __init__(self, app: Any, auth_token: str | None, allowed_origins: list[str] | None) -> None:
@@ -310,20 +338,45 @@ class _CorsMiddleware:
             await self.app(scope, receive, send)
             return
 
-        origin = ""
-        for key, value in scope.get("headers", []):
-            if key == b"origin":
-                origin = value.decode("latin-1").strip()
-                break
+        # #39: read EVERY Origin header. Reading only the first made the check
+        # first-must-match; the policy is all-must-match, and a disallowed
+        # second header used to be invisible.
+        origins = [
+            value.decode("latin-1").strip()
+            for key, value in scope.get("headers", [])
+            if key == b"origin"
+        ]
+        origins = [value for value in origins if value]
 
-        if origin and not _origin_allowed(origin, self.allowed_origins):
-            # The SDK's transport security would reject this too; answering here
-            # keeps the 403 and stops a disallowed origin reaching any route.
-            response = JSONResponse({"error": "origin not allowed"}, status_code=403)
+        for candidate in origins:
+            if not _origin_allowed(candidate, self.allowed_origins):
+                # The SDK's transport security would reject this too; answering
+                # here keeps the 403 and stops a disallowed origin reaching any
+                # route.
+                response = JSONResponse({"error": "origin not allowed"}, status_code=403)
+                await response(scope, receive, send)
+                return
+
+        origin = origins[0] if origins else ""
+        allow = origin if origin else ("*" if not self.auth_token else "null")
+
+        if scope["method"] == "OPTIONS":
+            # #36: answer the preflight. Every Origin has already been vetted
+            # above, so this request is from an allowed (or absent) origin.
+            response = Response(
+                status_code=204,
+                headers={
+                    "access-control-allow-origin": allow,
+                    "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
+                    "access-control-allow-headers": (
+                        "Authorization, Content-Type, Mcp-Session-Id"
+                    ),
+                    "access-control-max-age": "600",
+                    **({"vary": "Origin"} if origin else {}),
+                },
+            )
             await response(scope, receive, send)
             return
-
-        allow = origin if origin else ("*" if not self.auth_token else "null")
 
         async def send_with_cors(message: Any) -> None:
             if message["type"] == "http.response.start":
