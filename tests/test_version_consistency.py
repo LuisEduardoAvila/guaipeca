@@ -33,9 +33,11 @@ def test_version_is_semver():
 
 def test_health_endpoint_uses_package_version():
     """The /health payload is built from the package __version__, not a copy."""
-    import guaipeca.mcp_server as m
+    import guaipeca.mcp_sdk.http as http_mod
 
-    assert m.__version__ == guaipeca.__version__
+    assert http_mod.__version__ == guaipeca.__version__
 
-    source = (ROOT / "src" / "guaipeca" / "mcp_server.py").read_text(encoding="utf-8")
+    # The /health response is built in mcp_sdk/http.py; the hand-rolled
+    # transport that used to build it in mcp_server.py was removed (#58).
+    source = (ROOT / "src" / "guaipeca" / "mcp_sdk" / "http.py").read_text(encoding="utf-8")
     assert '"version": __version__' in source or "'version': __version__" in source

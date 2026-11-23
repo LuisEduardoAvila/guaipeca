@@ -14,10 +14,11 @@ Exposes twelve tools via Model Context Protocol:
 - uploads_status: show the upload-manifest state of a corpus
 - uploads_prune: remove stale upload-manifest entries (dry run by default)
 
-Transports:
-- stdio: newline-delimited JSON-RPC over stdin/stdout
-- http: MCP-compliant SSE-based transport (GET /sse + POST /messages)
-        + Streamable HTTP transport (POST /mcp, DELETE /mcp)
+Transports (both owned by the MCP SDK):
+- stdio: MCP over stdin/stdout via the SDK's stdio transport
+- http: the SDK's HTTP transport on uvicorn - Streamable HTTP (POST /mcp,
+        DELETE /mcp) + legacy SSE (GET /sse + POST /messages), plus the
+        non-MCP routes (/health, /tools, downloads, DELETE /documents)
 - both: stdio in a daemon thread + HTTP in main thread
 """
 
@@ -28,12 +29,12 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import threading
 import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from . import __version__
 from .config import GuaipecaConfig
 from .converter import Converter
 from .embedding import EmbeddingService
@@ -107,26 +108,6 @@ def _origin_allowed(origin: str, allowed_origins: list[str] | None) -> bool:
         return host in ("localhost", "ip6-localhost", "ip6-loopback")
 
 
-# MCP protocol version (latest revision this server implements)
-#
-# NOTE: these constants describe the pre-migration hand-rolled negotiation.
-# They are NOT what the serving transports use any more - the SDK owns version
-# negotiation on both `/mcp` and the SSE transport, and it knows about
-# 2026-07-28 as well. They survive because `handle_request()` still reads them
-# and is still exercised by unit tests; `_process_jsonrpc()` (their only other
-# caller) is no longer reachable from any transport.
-#
-# Do not extend this set to fix a negotiation bug: the fix belongs in the SDK.
-MCP_VERSION = "2025-11-25"
-
-# Known protocol versions for negotiation (hand-rolled path only - see above)
-KNOWN_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
-
-# Minimum protocol version for the retired hand-rolled `/mcp` handler. The
-# enforcement it refers to no longer exists: the SDK's transport decides which
-# eras it serves. Kept only because `handle_request()` still checks it.
-MIN_STREAMABLE_VERSION = "2025-03-26"
-
 # Tool definitions
 TOOLS = [
     {
@@ -149,10 +130,12 @@ TOOLS = [
                     "type": "integer",
                     "description": "Number of results to return (default: 5).",
                     "default": 5,
+                    "maximum": 200,
                 },
                 "corpora": {
                     "type": "array",
                     "items": {"type": "string"},
+                    "maxItems": 20,
                     "description": (
                         "LIST of corpus names to search, e.g. [\"epm-docs\"]. "
                         "Other tools take corpus=\"name\" (singular); this one is "
@@ -176,6 +159,7 @@ TOOLS = [
                         "otherwise documents."
                     ),
                     "default": "chunks",
+                    "enum": ["chunks", "documents", "auto"],
                 },
                 "max_chars": {
                     "type": "integer",
@@ -446,22 +430,42 @@ TOOLS = [
     },
 ]
 
+# Upper bound on a search's corpora list. Mirrors the maxItems in the search
+# tool schema; the SDK does not validate arguments against a schema, so the
+# handler has to keep the promise the schema makes.
+_MAX_CORPORA = 20
 
-def _sanitize_error_message(exc: Exception) -> str:
-    """Sanitize error messages for client responses.
 
-    Removes internal file paths and library details that could
-    leak system information. Full exception is logged internally.
+# Path-like runs in an exception message: 3+ segments, or 2 segments ending
+# in a file extension. A two-segment token like "/mcp" is left alone. Note
+# the limit of this shape-based rule: a 3+ segment API path ("/api/v1/users")
+# is indistinguishable from a filesystem path and IS masked. That is the safe
+# direction for a sanitiser - over-masking a path costs a less specific error
+# message, under-masking costs a disclosure.
+#
+# The prefix class matters more than it looks. CPython's OSError renders its
+# filename with repr() - "[Errno 2] No such file or directory: '/path/a.md'" -
+# so the character before the slash is usually a QUOTE, and that is the most
+# common shape of the errors this sanitiser exists for. Quotes, brackets and
+# backticks are included for the same reason; a prefix-only-at-start-or-space
+# class silently leaked every quoted path (found in adversarial review, J1).
+_CLIENT_PATH_RE = re.compile(
+    r"(?:^|[\s(:=,\[\]{}'\"`])/(?:[\w.-]+/){2,}[\w.-]+"
+    r"|(?:^|[\s(:=,\[\]{}'\"`])/[\w.-]+/[\w-]+\.[A-Za-z0-9]+"
+)
+
+
+def _client_error_message(exc: Exception) -> str:
+    """Build a client-safe message for an exception raised inside a tool call.
+
+    The full exception (with traceback) is logged server-side; what reaches
+    the client must not leak filesystem layout or internal type names. The
+    message is taken from ``str(exc)`` only (the exception class name is
+    never included), absolute file paths are replaced with a placeholder, and
+    the result is truncated.
     """
-    msg = str(exc)
-    # Replace absolute file paths with generic placeholder.
-    # Only match paths that look like real filesystem paths (3+ segments,
-    # or 2 segments with a file extension) to avoid sanitizing short
-    # slash-prefixed tokens like "/api/v1" in error messages.
-    import re
-    _path_re = re.compile(r"(?:^|\s)/(?:[\w.-]+/){2,}[\w.-]+|(?:^|\s)/[\w.-]+/[\w-]+\.[\w]+")
-    msg = _path_re.sub(" [path]", msg)
-    # Truncate overly long messages
+    msg = str(exc) or "internal error"
+    msg = _CLIENT_PATH_RE.sub(" [path]", msg)
     if len(msg) > 300:
         msg = msg[:300] + "..."
     return msg
@@ -546,56 +550,6 @@ class GuaipecaMCPServer:
             )
             # Don't block startup — model will be loaded lazily on first use
 
-    def handle_request(self, method: str, params: dict) -> dict | None:
-        """
-        Handle a single MCP JSON-RPC request.
-
-        Returns the result dict, or None for notifications (which require no response).
-        """
-        params = params or {}
-
-        # Handle notifications — these are one-way messages from the client
-        # that should NOT receive a response (no error, no result)
-        if method.startswith("notifications/"):
-            logger.debug(f"Received notification: {method}")
-            return None
-
-        if method == "initialize":
-            # Protocol version negotiation: echo client's version if known,
-            # otherwise fall back to server's default. The R3 minimum-version
-            # check for /mcp is enforced in the HTTP handler, not here.
-            client_version = params.get("protocolVersion", MCP_VERSION)
-            if client_version in KNOWN_PROTOCOL_VERSIONS:
-                negotiated = client_version
-            else:
-                logger.info(
-                    "Unknown MCP protocol version %r requested; "
-                    "falling back to %s",
-                    client_version,
-                    MCP_VERSION,
-                )
-                negotiated = MCP_VERSION
-            return {
-                "protocolVersion": negotiated,
-                "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {
-                    "name": "guaipeca",
-                    "version": __version__,
-                },
-            }
-
-        elif method == "tools/list":
-            return {"tools": self._tools_with_corpus_enum()}
-
-        elif method == "tools/call":
-            return self._handle_tool_call(params)
-
-        elif method == "ping":
-            return {}
-
-        else:
-            return {"error": {"code": -32601, "message": f"Method not found: {method}"}}
-
     def _tools_with_corpus_enum(self) -> list[dict]:
         """Return TOOLS with the live corpus names advertised on corpus parameters.
 
@@ -644,113 +598,168 @@ class GuaipecaMCPServer:
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
 
-        rejection = self._reject_unknown_arguments(tool_name, arguments)
-        if rejection is not None:
-            return rejection
+        # The reject call sits INSIDE the try: it does set(arguments or {}),
+        # which raises TypeError on a non-iterable, and it used to run before
+        # the guard existed so a client-supplied arguments=123 escaped the
+        # handler entirely (found in adversarial review, J2).
+        try:
+            rejection = self._reject_unknown_arguments(tool_name, arguments)
+            if rejection is not None:
+                return rejection
 
-        if tool_name == "search":
-            query = arguments.get("query", "")
-            top_k = arguments.get("top_k", 5)
-            corpora = arguments.get("corpora")
-            hybrid = arguments.get("hybrid")
-            return_mode = arguments.get("return_mode", "chunks")
-            max_chars = arguments.get("max_chars")
-            section_mode = arguments.get("section_mode", False)
-            section_filter = arguments.get("section_filter")
-            max_distance = arguments.get("max_distance")
-            result = self.searcher.search(
-                query, top_k=top_k, corpora=corpora, hybrid=hybrid,
-                return_mode=return_mode, max_chars=max_chars,
-                section_mode=section_mode, section_filter=section_filter,
-                max_distance=max_distance,
-            )
-            # search() reports validation failures as {"results": [], "error": ...}.
-            # Returning that as a success made a wrong corpus name look like a
-            # valid zero-hit search, which a client cannot distinguish.
-            if isinstance(result, dict) and result.get("error"):
-                return self._error_result(result["error"])
-            return self._result_to_mcp(result)
-
-        elif tool_name == "get_chunk":
-            chunk_id = arguments.get("chunk_id", "")
-            result = self.searcher.get_chunk(chunk_id)
-            if result is None:
-                return self._error_result(f"Chunk not found: {chunk_id}")
-            return self._result_to_mcp(result)
-
-        elif tool_name == "get_document":
-            corpus = arguments.get("corpus", "")
-            source_path = arguments.get("source_path", "")
-            result = self.searcher.get_document(corpus, source_path)
-            if result is None:
-                return self._error_result(
-                    f"Document not found: {source_path} in corpus {corpus}"
+            if tool_name == "search":
+                query = arguments.get("query", "")
+                top_k = arguments.get("top_k", 5)
+                if isinstance(top_k, bool) or not isinstance(top_k, (int, str)):
+                    return self._error_result(
+                        f"top_k must be an integer, got {type(top_k).__name__}"
+                    )
+                if isinstance(top_k, str):
+                    # A numeric string ("5") is a common client slip; coerce
+                    # it instead of letting int math raise a TypeError later.
+                    try:
+                        top_k = int(top_k)
+                    except ValueError:
+                        return self._error_result(
+                            f"top_k must be an integer, got {top_k!r}"
+                        )
+                top_k = max(1, min(200, top_k))
+                corpora = arguments.get("corpora")
+                if isinstance(corpora, str):
+                    # A bare string would otherwise be iterated character by
+                    # character, searching one-character "corpora".
+                    corpora = [corpora]
+                elif corpora is not None and (
+                    not isinstance(corpora, list)
+                    or not all(isinstance(c, str) for c in corpora)
+                ):
+                    return self._error_result(
+                        f"corpora must be a list of corpus names, got {corpora!r}"
+                    )
+                # The schema advertises maxItems 20, and search() does one
+                # index load and one dense+BM25 search PER ENTRY, accumulating
+                # every entry's results before sorting. A 10,000-entry request
+                # measured ~5s and ~1.2GB peak RSS, so an unenforced bound is a
+                # single-request resource exhaustion on an optionally
+                # unauthenticated surface (found in adversarial review, J3).
+                if corpora is not None and len(corpora) > _MAX_CORPORA:
+                    return self._error_result(
+                        f"corpora takes at most {_MAX_CORPORA} corpus names, "
+                        f"got {len(corpora)}"
+                    )
+                hybrid = arguments.get("hybrid")
+                return_mode = arguments.get("return_mode", "chunks")
+                if return_mode not in ("chunks", "documents", "auto"):
+                    return self._error_result(
+                        "return_mode must be one of 'chunks', 'documents' or "
+                        f"'auto', got {return_mode!r}"
+                    )
+                max_chars = arguments.get("max_chars")
+                section_mode = arguments.get("section_mode", False)
+                section_filter = arguments.get("section_filter")
+                max_distance = arguments.get("max_distance")
+                result = self.searcher.search(
+                    query, top_k=top_k, corpora=corpora, hybrid=hybrid,
+                    return_mode=return_mode, max_chars=max_chars,
+                    section_mode=section_mode, section_filter=section_filter,
+                    max_distance=max_distance,
                 )
-            return self._result_to_mcp(result)
+                # search() reports validation failures as {"results": [], "error": ...}.
+                # Returning that as a success made a wrong corpus name look like a
+                # valid zero-hit search, which a client cannot distinguish.
+                if isinstance(result, dict) and result.get("error"):
+                    return self._error_result(result["error"])
+                return self._result_to_mcp(result)
 
-        elif tool_name == "list_documents":
-            corpus = arguments.get("corpus")
-            result = self.searcher.list_documents(corpus=corpus)
-            if "error" in result:
-                return self._error_result(result["error"])
-            return self._result_to_mcp(result)
+            elif tool_name == "get_chunk":
+                chunk_id = arguments.get("chunk_id", "")
+                result = self.searcher.get_chunk(chunk_id)
+                if result is None:
+                    return self._error_result(f"Chunk not found: {chunk_id}")
+                return self._result_to_mcp(result)
 
-        elif tool_name == "index":
-            corpus = arguments.get("corpus", "all")
-            force = arguments.get("force", False)
-            result = self.searcher.index_corpus(corpus_name=corpus, force=force)
-            return self._result_to_mcp(result)
+            elif tool_name == "get_document":
+                corpus = arguments.get("corpus", "")
+                source_path = arguments.get("source_path", "")
+                result = self.searcher.get_document(corpus, source_path)
+                if result is None:
+                    return self._error_result(
+                        f"Document not found: {source_path} in corpus {corpus}"
+                    )
+                return self._result_to_mcp(result)
 
-        elif tool_name == "status":
-            return self._result_to_mcp(self.searcher.status)
+            elif tool_name == "list_documents":
+                corpus = arguments.get("corpus")
+                result = self.searcher.list_documents(corpus=corpus)
+                if "error" in result:
+                    return self._error_result(result["error"])
+                return self._result_to_mcp(result)
 
-        elif tool_name == "list_folders":
-            return self._result_to_mcp(self._list_upload_folders())
+            elif tool_name == "index":
+                corpus = arguments.get("corpus", "all")
+                force = arguments.get("force", False)
+                result = self.searcher.index_corpus(corpus_name=corpus, force=force)
+                return self._result_to_mcp(result)
 
-        elif tool_name == "upload":
-            corpus = arguments.get("corpus", "")
-            filename = arguments.get("filename", "")
-            content_b64 = arguments.get("content", "")
-            do_index = arguments.get("index", self.config.upload.auto_index)
-            result = self._handle_upload(corpus, filename, content_b64, do_index)
-            if result.get("error"):
-                return self._error_result(result["error"])
-            return self._result_to_mcp(result)
+            elif tool_name == "status":
+                return self._result_to_mcp(self.searcher.status)
 
-        elif tool_name == "get_toc":
-            corpus = arguments.get("corpus", "")
-            document = arguments.get("document")
-            result = self.searcher.get_toc(corpus=corpus, document=document)
-            if "error" in result:
-                return self._error_result(result["error"])
-            return self._result_to_mcp(result)
+            elif tool_name == "list_folders":
+                return self._result_to_mcp(self._list_upload_folders())
 
-        elif tool_name == "delete":
-            corpus = arguments.get("corpus", "")
-            filename = arguments.get("filename", "")
-            do_index = arguments.get("index", self.config.upload.auto_index)
-            result = self._handle_delete(corpus, filename, do_index)
-            if result.get("error"):
-                return self._error_result(result["error"])
-            return self._result_to_mcp(result)
+            elif tool_name == "upload":
+                corpus = arguments.get("corpus", "")
+                filename = arguments.get("filename", "")
+                content_b64 = arguments.get("content", "")
+                do_index = arguments.get("index", self.config.upload.auto_index)
+                result = self._handle_upload(corpus, filename, content_b64, do_index)
+                if result.get("error"):
+                    return self._error_result(result["error"])
+                return self._result_to_mcp(result)
 
-        elif tool_name == "uploads_status":
-            corpus = arguments.get("corpus", "")
-            result = manifest_status(self.config, corpus)
-            if result.get("error"):
-                return self._error_result(result["error"])
-            return self._result_to_mcp(result)
+            elif tool_name == "get_toc":
+                corpus = arguments.get("corpus", "")
+                document = arguments.get("document")
+                result = self.searcher.get_toc(corpus=corpus, document=document)
+                if "error" in result:
+                    return self._error_result(result["error"])
+                return self._result_to_mcp(result)
 
-        elif tool_name == "uploads_prune":
-            corpus = arguments.get("corpus", "")
-            apply = arguments.get("apply", False)
-            result = prune_orphans(self.config, corpus, apply=apply)
-            if result.get("error"):
-                return self._error_result(result["error"])
-            return self._result_to_mcp(result)
+            elif tool_name == "delete":
+                corpus = arguments.get("corpus", "")
+                filename = arguments.get("filename", "")
+                do_index = arguments.get("index", self.config.upload.auto_index)
+                result = self._handle_delete(corpus, filename, do_index)
+                if result.get("error"):
+                    return self._error_result(result["error"])
+                return self._result_to_mcp(result)
 
-        else:
-            return self._error_result(f"Unknown tool: {tool_name}")
+            elif tool_name == "uploads_status":
+                corpus = arguments.get("corpus", "")
+                result = manifest_status(self.config, corpus)
+                if result.get("error"):
+                    return self._error_result(result["error"])
+                return self._result_to_mcp(result)
+
+            elif tool_name == "uploads_prune":
+                corpus = arguments.get("corpus", "")
+                apply = arguments.get("apply", False)
+                result = prune_orphans(self.config, corpus, apply=apply)
+                if result.get("error"):
+                    return self._error_result(result["error"])
+                return self._result_to_mcp(result)
+
+            else:
+                return self._error_result(f"Unknown tool: {tool_name}")
+        except Exception as exc:
+            # The searcher and the upload adapters raise freely (OSError,
+            # KeyError, model errors). A raw exception would leak filesystem
+            # paths and internals to the client, so log the full detail here
+            # and return a sanitised message instead.
+            logger.error(
+                "Error handling tool call %r: %s", tool_name, exc, exc_info=True
+            )
+            return self._error_result(_client_error_message(exc))
 
     @staticmethod
     def _result_to_mcp(result: Any) -> dict:
@@ -865,51 +874,6 @@ class GuaipecaMCPServer:
             self.config, corpus_name, filename, do_index, self.searcher
         )
 
-    # ---- shared JSON-RPC processing ----
-
-    def _process_jsonrpc(self, raw_body: bytes) -> dict | None:
-        """Process a raw JSON-RPC request body and return a response dict.
-
-        Shared between stdio and HTTP POST handlers to avoid duplication.
-
-        Args:
-            raw_body: Raw bytes (or string) containing a JSON-RPC request.
-
-        Returns:
-            Response dict (jsonrpc, id, result/error) or None for notifications.
-            Returns an error response dict if parsing fails.
-        """
-        request = None
-        try:
-            if isinstance(raw_body, bytes):
-                request = json.loads(raw_body)
-            else:
-                request = json.loads(raw_body)
-            method = request.get("method", "")
-            params = request.get("params", {})
-            req_id = request.get("id")
-            result = self.handle_request(method, params)
-
-            # Notifications have no id and should not receive a response
-            if result is None or req_id is None:
-                return None
-
-            return {"jsonrpc": "2.0", "id": req_id, "result": result}
-        except json.JSONDecodeError:
-            logger.error("Invalid JSON in request body")
-            return {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32700, "message": "Parse error"},
-            }
-        except Exception as e:
-            logger.error(f"Error handling JSON-RPC request: {e}", exc_info=True)
-            req_id = request.get("id") if request is not None else None
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": -32603, "message": _sanitize_error_message(e)},
-            }
     def run_sdk_stdio(self):
         """Run the stdio transport through the official SDK (async stdio session).
 
