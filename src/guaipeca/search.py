@@ -140,6 +140,11 @@ class Searcher:
                 corpus_idx._load()
                 if corpus_idx._faiss_index and corpus_idx._faiss_index.ntotal > 0:
                     total_indexed += corpus_idx._faiss_index.ntotal
+                # A populated BM25 index also means the corpus has indexed
+                # content: a corpus with chunks but zero FAISS vectors (e.g.
+                # a partially written index) must not be reported as empty.
+                if corpus_idx._bm25_retriever is not None:
+                    total_indexed += len(corpus_idx._bm25_corpus_texts)
 
         if total_indexed == 0:
             return {
