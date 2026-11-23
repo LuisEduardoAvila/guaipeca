@@ -479,12 +479,18 @@ def cmd_serve(args):
     # when the process is about to exit. The check only applies to transports
     # that actually open a socket: stdio talks over stdin/stdout, so a
     # non-loopback host there exposes nothing and must not block startup.
-    from .mcp_sdk.http import _check_bind_exposure
+    from .mcp_sdk.http import _allowed_origin_patterns, _check_bind_exposure
     from .mcp_server import GuaipecaMCPServer
 
     if transport in ("http", "both"):
         try:
             _check_bind_exposure(host, config.server.auth_token)
+            # #74: validate the origin allowlist in the same pre-construction
+            # pass: a "*" entry raises ValueError from _allowed_origin_patterns,
+            # and the server constructor's ~3s embedding-model load would be
+            # wasted work before the process exits. serve() validates the same
+            # list again as the last line of defence for direct callers.
+            _allowed_origin_patterns(config.server.allowed_origins)
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)

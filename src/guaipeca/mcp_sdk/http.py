@@ -126,6 +126,11 @@ def _allowed_origin_patterns(allowed_origins: list[str] | None) -> list[str]:
     ``None`` keeps today's loopback default (see ``_origin_allowed``); a
     non-empty list is an exact-match allowlist and also replaces the loopback
     default, exactly as ``_origin_allowed`` does.
+
+    Raises:
+        ValueError: when an entry contains ``*``: matching is exact string
+            comparison, so a wildcard would never match and the
+            misconfiguration would be silent (#37).
     """
     if not allowed_origins:
         return list(_LOOPBACK_ORIGIN_PATTERNS)
@@ -142,6 +147,9 @@ def _allowed_origin_patterns(allowed_origins: list[str] | None) -> list[str]:
     for entry in allowed_origins:
         normalised = entry.rstrip("/")
         if not normalised:
+            # #79: an entry that normalises to empty is a configuration
+            # mistake; name it instead of dropping it silently.
+            logger.warning(f"ignoring empty server.allowed_origins entry {entry!r}")
             continue
         if "*" in normalised:
             raise ValueError(
@@ -151,6 +159,41 @@ def _allowed_origin_patterns(allowed_origins: list[str] | None) -> list[str]:
             )
         patterns.append(normalised)
     return patterns
+
+
+# #77: a serialised origin is scheme://host[:port]; a browser emits at most a
+# few hundred bytes, so 2048 is a generous cap for anything legitimate.
+_MAX_ORIGIN_BYTES = 2048
+
+
+def _origin_is_well_formed(origin: str) -> bool:
+    """Whether an Origin value could have come from a browser (#77).
+
+    Control bytes below 0x21 (and DEL, 0x7F) would let a hand-built request
+    smuggle header bytes into an echoed ACAO, and a serialised origin never
+    approaches 2048 bytes. The header arrived latin-1-decoded (one character
+    per wire byte), so ``ord`` and ``len`` are byte checks.
+    """
+    if len(origin) > _MAX_ORIGIN_BYTES:
+        return False
+    return not any(ord(char) < 0x21 or ord(char) == 0x7F for char in origin)
+
+
+def _matched_origin(origin: str, allowed_origins: list[str] | None) -> str | None:
+    """The allowlist entry ``origin`` matched, normalised to no trailing "/".
+
+    Returns None when there is no allowlist (the loopback default has no entry
+    to echo) or nothing matched. The normalisation mirrors ``_origin_allowed``
+    exactly, so an origin the policy allowed always yields its matched entry
+    here (#76).
+    """
+    if not allowed_origins:
+        return None
+    normalised = origin.rstrip("/")
+    for entry in allowed_origins:
+        if normalised == entry.rstrip("/"):
+            return entry.rstrip("/")
+    return None
 
 
 def _allowed_host_patterns(host: str, allowed_origins: list[str] | None) -> list[str]:
@@ -307,6 +350,43 @@ def _check_bearer(request: Any, auth_token: str | None) -> bool:
     )
 
 
+# #73/#75: the methods each route actually serves, keyed by the path a request
+# arrives with. The preflight must advertise only these (#73), and a path that
+# is not in this table is unknown to the app, so its preflight must not claim
+# a 204 the real request would 404 (#75). One table feeds both so the two
+# checks cannot disagree.
+#
+# Derived from the route table in build_app() and the SDK's own routes: /mcp is
+# the SDK's Streamable HTTP route (POST, plus GET/DELETE for session teardown),
+# /mcp/ is the explicit redirect route, /sse is the legacy SSE stream (GET),
+# /messages is the SSE message Mount (POST), and /download/... and /messages/...
+# are prefix matches because the download filename keeps embedded slashes
+# (``:path`` converter) and the Mount answers under its trailing-slash prefix.
+_ROUTE_METHODS: dict[str, str] = {
+    "/health": "GET, OPTIONS",
+    "/tools": "GET, OPTIONS",
+    "/documents": "DELETE, OPTIONS",
+    "/mcp": "POST, GET, DELETE, OPTIONS",
+    "/mcp/": "POST, GET, DELETE, OPTIONS",
+    "/sse": "GET, OPTIONS",
+    "/messages": "POST, OPTIONS",
+}
+
+
+def _allowed_methods_for_path(path: str) -> str | None:
+    """The methods the app serves at ``path``, or None for an unknown path.
+
+    See :data:`_ROUTE_METHODS` for the source of the table. ``/download/`` and
+    ``/messages/`` are prefix matches: the download filename keeps embedded
+    slashes and the SSE message Mount answers under its trailing-slash prefix.
+    """
+    if path.startswith("/download/"):
+        return "GET, OPTIONS"
+    if path.startswith("/messages/"):
+        return "POST, OPTIONS"
+    return _ROUTE_METHODS.get(path)
+
+
 class _CorsMiddleware:
     """Add ``Access-Control-Allow-Origin`` and answer CORS preflights.
 
@@ -317,7 +397,13 @@ class _CorsMiddleware:
     Origin policy: a non-empty Origin that fails ``_origin_allowed`` is answered
     with 403 here, before any route runs. A request with no Origin gets ``*``
     when no auth token is configured and ``null`` when one is; a validated
-    Origin is echoed back.
+    Origin is echoed back - with an allowlist, the entry that matched
+    (normalised, no trailing "/"), not the raw request text (issue #76).
+
+    A lone empty ``Origin`` header is filtered as absent: it carries no origin
+    to match, so the no-Origin policy above applies (issue #79). An Origin
+    containing control bytes or longer than 2048 bytes is answered 400 before
+    matching or echoing (issue #77, see ``_origin_is_well_formed``).
 
     Every ``Origin`` header must match: a request carrying two, one allowed and
     one not, is rejected (issue #39). Browsers send at most one, but a proxy or
@@ -325,7 +411,11 @@ class _CorsMiddleware:
 
     Preflights are answered here with ``204`` (issue #36). The routes never
     handle ``OPTIONS``: without this they answered ``405`` carrying an ACAO
-    header, which reads like working CORS while the browser still aborts.
+    header, which reads like working CORS while the browser still aborts. The
+    advertised methods are the ones the path actually serves (issue #73, see
+    ``_allowed_methods_for_path``), and a preflight for a path the app does not
+    serve is delegated to the inner app so it gets the same 404 the real
+    request would (issue #75).
     """
 
     def __init__(self, app: Any, auth_token: str | None, allowed_origins: list[str] | None) -> None:
@@ -349,6 +439,14 @@ class _CorsMiddleware:
         origins = [value for value in origins if value]
 
         for candidate in origins:
+            # #77: reject origins no browser could have produced BEFORE
+            # matching or echoing (see _origin_is_well_formed). The check
+            # lives in this same loop so the all-must-match pass covers
+            # every Origin header in one pass.
+            if not _origin_is_well_formed(candidate):
+                response = JSONResponse({"error": "invalid origin"}, status_code=400)
+                await response(scope, receive, send)
+                return
             if not _origin_allowed(candidate, self.allowed_origins):
                 # The SDK's transport security would reject this too; answering
                 # here keeps the 403 and stops a disallowed origin reaching any
@@ -358,16 +456,56 @@ class _CorsMiddleware:
                 return
 
         origin = origins[0] if origins else ""
-        allow = origin if origin else ("*" if not self.auth_token else "null")
+        # #76: with an allowlist, echo the entry that matched (normalised,
+        # no trailing "/"), not the raw request origin - otherwise a trailing
+        # "/" in the request would survive into ACAO. Without an allowlist
+        # there is no entry to echo, so the request origin is echoed as
+        # before; an absent origin keeps the "*" / "null" rule.
+        if origin:
+            matched = _matched_origin(origin, self.allowed_origins)
+            allow = matched if matched is not None else origin
+        else:
+            allow = "*" if not self.auth_token else "null"
+
+        async def send_with_cors(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append((b"access-control-allow-origin", allow.encode("latin-1")))
+                if origin:
+                    # #78: combine with a Vary the inner app already sent
+                    # instead of appending a second header: the browser treats
+                    # them as one union, but two headers where one suffices is
+                    # a bug, and the inner app's value must not be dropped.
+                    existing = [
+                        part.strip()
+                        for key, value in headers
+                        if key == b"vary"
+                        for part in value.decode("latin-1").split(",")
+                    ]
+                    if not any(part.lower() == "origin" for part in existing):
+                        existing.append("Origin")
+                    headers = [(key, value) for key, value in headers if key != b"vary"]
+                    headers.append((b"vary", ", ".join(existing).encode("latin-1")))
+                message = {**message, "headers": headers}
+            await send(message)
 
         if scope["method"] == "OPTIONS":
             # #36: answer the preflight. Every Origin has already been vetted
             # above, so this request is from an allowed (or absent) origin.
+            # #75: a path the app does not serve must not get a blanket 204 -
+            # delegate to the inner app so the preflight gets the same 404
+            # the real request would.
+            methods = _allowed_methods_for_path(scope["path"])
+            if methods is None:
+                await self.app(scope, receive, send_with_cors)
+                return
+            # #73: advertise only the methods the path actually serves; the
+            # old hardcoded list invited requests that would 405.
             response = Response(
                 status_code=204,
                 headers={
                     "access-control-allow-origin": allow,
-                    "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
+                    "access-control-allow-methods": methods,
                     "access-control-allow-headers": (
                         "Authorization, Content-Type, Mcp-Session-Id"
                     ),
@@ -377,15 +515,6 @@ class _CorsMiddleware:
             )
             await response(scope, receive, send)
             return
-
-        async def send_with_cors(message: Any) -> None:
-            if message["type"] == "http.response.start":
-                headers = list(message.get("headers", []))
-                headers.append((b"access-control-allow-origin", allow.encode("latin-1")))
-                if origin:
-                    headers.append((b"vary", b"Origin"))
-                message = {**message, "headers": headers}
-            await send(message)
 
         await self.app(scope, receive, send_with_cors)
 
@@ -870,7 +999,17 @@ def serve(
     import uvicorn
 
     actual_port = _pick_port(host, port)
-    app = build_app(config, server_instance, host=host)
+    try:
+        app = build_app(config, server_instance, host=host)
+    except ValueError as exc:
+        # #74: build_app validates the configuration (a '*' in
+        # allowed_origins, an unauthenticated public bind, ...); a raw
+        # traceback is not a startup message, so print the error and exit 1,
+        # the same shape cmd_serve uses for _check_bind_exposure. Only
+        # ValueError: any other exception is a real bug and must not be
+        # swallowed.
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     logger.info(f"Starting Guaipeca MCP server (HTTP/Streamable) on {host}:{actual_port}")
     print(f"Guaipeca MCP server listening on http://{host}:{actual_port}", file=sys.stderr)
