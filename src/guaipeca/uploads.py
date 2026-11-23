@@ -131,6 +131,22 @@ def _is_reserved_name(filename: str) -> bool:
     )
 
 
+def _entry_sha256(entry) -> str | None:
+    """The recorded checksum of a manifest entry, or None if unreadable.
+
+    A manifest can be hand-edited or half-written, so an entry is not always
+    the dict this module writes. Returning None for anything that is not a
+    dict with a string sha256 keeps the three readers - save_upload's drift
+    warning, delete_upload's corrupt-entry refusal and manifest_status's drift
+    report - from disagreeing about what a corrupt entry means.
+    """
+    if isinstance(entry, dict):
+        sha = entry.get("sha256")
+        if isinstance(sha, str):
+            return sha
+    return None
+
+
 def _read_manifest(corpus_path: Path) -> dict:
     """Read the corpus upload manifest.
 
@@ -263,6 +279,8 @@ def save_upload(
             }
     except UnicodeEncodeError:
         return {"error": "Invalid filename"}
+
+    # Reserved names are refused regardless of manifest state, before any
     # filesystem write.
     if _is_reserved_name(filename):
         return {
@@ -271,9 +289,8 @@ def save_upload(
 
     ext = Path(filename).suffix.lower()
     if ext not in config.upload.allowed_extensions:
-        return {
-            "error": f"Extension '{ext}' not allowed. Permitted: {config.upload.allowed_extensions}"
-        }
+        permitted = ", ".join(config.upload.allowed_extensions)
+        return {"error": f"Extension '{ext}' not allowed. Permitted: {permitted}"}
 
     # Check size limit
     if len(content_bytes) > config.upload.max_file_size:
@@ -307,7 +324,7 @@ def save_upload(
         # file was edited outside the API; re-uploading is the normal fix, so
         # this is a warning, not a refusal.
         entry = manifest[filename]
-        expected = entry.get("sha256") if isinstance(entry, dict) else None
+        expected = _entry_sha256(entry)
         if expected is not None and dest.is_file():
             actual = _sha256_file(dest)
             if actual != expected:
@@ -443,9 +460,8 @@ def delete_upload(
     # API can never write is a file the API will never delete.
     ext = Path(filename).suffix.lower()
     if ext not in config.upload.allowed_extensions:
-        return {
-            "error": f"Extension '{ext}' not allowed. Permitted: {config.upload.allowed_extensions}"
-        }
+        permitted = ", ".join(config.upload.allowed_extensions)
+        return {"error": f"Extension '{ext}' not allowed. Permitted: {permitted}"}
 
     corpus_path = Path(corpus.path)
     file_path = corpus_path / filename
@@ -468,7 +484,7 @@ def delete_upload(
                 f"this file (no manifest entry)"
             )
         }
-    if not isinstance(entry, dict) or not isinstance(entry.get("sha256"), str):
+    if _entry_sha256(entry) is None:
         return {
             "error": f"Refusing to delete '{filename}': manifest entry is corrupt"
         }
@@ -580,7 +596,7 @@ def manifest_status(config: GuaipecaConfig, corpus_name: str) -> dict:
             missing_files.append(filename)
             continue
         tracked += 1
-        expected = entry.get("sha256") if isinstance(entry, dict) else None
+        expected = _entry_sha256(entry)
         actual = _sha256_file(file_path)
         if expected != actual:
             drifted.append({"filename": filename, "expected": expected, "actual": actual})
