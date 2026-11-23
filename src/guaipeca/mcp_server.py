@@ -835,9 +835,12 @@ class GuaipecaMCPServer:
         """
         import base64
 
-        # Decode content
+        # Decode content. validate=True rejects anything outside the base64
+        # alphabet instead of silently dropping it: a lenient decode turns
+        # junk into a shorter or empty payload that would be saved as a
+        # corrupted (or blank) document.
         try:
-            content_bytes = base64.b64decode(content_b64)
+            content_bytes = base64.b64decode(content_b64, validate=True)
         except Exception:
             return {"error": "Invalid base64 content"}
 

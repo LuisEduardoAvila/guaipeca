@@ -189,6 +189,18 @@ def save_upload(
         max_mb = config.upload.max_file_size / (1024 * 1024)
         return {"error": f"File too large ({len(content_bytes)} bytes, max {max_mb:.0f}MB)"}
 
+    # Refuse empty and whitespace-only content. This lives in the shared
+    # core (not the MCP adapter) because the CLI hands save_upload raw
+    # bytes and never touches base64. Checked before any manifest read or
+    # filesystem write so a rejected upload leaves no file, temp file or
+    # manifest entry behind. Always refused; there is no opt-in.
+    if len(content_bytes) == 0:
+        return {"error": f"Refusing empty upload: '{filename}' has no content"}
+    if content_bytes.strip() == b"":
+        return {
+            "error": f"Refusing blank upload: '{filename}' contains only whitespace"
+        }
+
     # Save to corpus directory
     corpus_path = Path(corpus.path)
     corpus_path.mkdir(parents=True, exist_ok=True)
