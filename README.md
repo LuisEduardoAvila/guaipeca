@@ -342,7 +342,7 @@ list_folders()
 ```
 
 ### upload
-Upload a file to a corpus for conversion and indexing. File content must be base64-encoded. Only corpora listed in `upload.allow` can receive files. The server records every upload in a per-corpus manifest (`uploaded.json`); overwriting an existing filename is refused unless the server uploaded that file itself or the corpus sets `upload.replace` to `true`.
+Upload a file to a corpus for conversion and indexing. File content must be base64-encoded. Only corpora listed in `upload.allow` can receive files. The server records every upload in a per-corpus manifest (`uploaded.json`); overwriting an existing filename is refused unless the server uploaded that file itself or the corpus sets `upload.replace` to `true`. Malformed base64 (anything outside the base64 alphabet is rejected, not silently dropped), empty content, and whitespace-only content are all refused, and a refused upload writes nothing — no file, no temp file, no manifest entry.
 ```
 upload(corpus="epm-docs", filename="report.pdf", content="<base64>", index=true)
 ```
@@ -355,7 +355,7 @@ get_toc(corpus="epm-docs", document="/path/to/report.md")
 ```
 
 ### delete
-Delete a file from a corpus that accepts uploads. Only corpora listed in `upload.allow` can have files deleted, and only files the server uploaded itself (tracked in the upload manifest) may be deleted. A file whose content was edited outside the API is refused as drift. The corpus is re-indexed after deletion to remove stale chunks.
+Delete a file from a corpus that accepts uploads. Only corpora listed in `upload.allow` can have files deleted, and only files the server uploaded itself (tracked in the upload manifest) may be deleted. A file whose content was edited outside the API is refused as drift. The corpus is re-indexed after deletion to remove stale chunks. Delete-then-upload is the documented replacement flow but is **not atomic**: a delete followed by a failed (refused) upload leaves the document missing, so clients should validate the payload before deleting.
 ```
 delete(corpus="epm-docs", filename="report.pdf", index=true)
 ```
@@ -399,7 +399,7 @@ guaipeca get-document --corpus C --path /abs/file.md   # Retrieve document text
 guaipeca list-documents [corpus]       # List indexed documents
 guaipeca list-folders                  # List upload-enabled corpora
 guaipeca get-toc --corpus C [--document /abs/file.md]  # Table of contents
-guaipeca upload --corpus C <file>      # Upload a file and index it
+guaipeca upload --corpus C <file>      # Upload a file and index it (empty or whitespace-only files are refused, exit 1)
 guaipeca delete --corpus C <filename>  # Delete a file and re-index
 guaipeca uploads-status --corpus C [--json]  # Show upload manifest status
 guaipeca uploads-prune --corpus C [--apply] [--json]  # Prune stale manifest entries

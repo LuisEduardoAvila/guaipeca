@@ -103,6 +103,8 @@ upload:
     - .htm
     - .csv
   auto_index: true                 # index the corpus automatically after upload
+  # Empty and whitespace-only uploads are always refused (no file, manifest
+  # entry, or temp file is written); there is no opt-in for that.
   # replace:                       # per-corpus permission to overwrite a file
     # epm-docs: true               # the server did not upload itself. Absent or
     #                              # false (the default) refuses such overwrites;

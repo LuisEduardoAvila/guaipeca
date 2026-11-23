@@ -23,6 +23,8 @@ import json
 import logging
 import os
 import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -37,6 +39,83 @@ logger = logging.getLogger(__name__)
 # {"sha256": <hex>, "size_bytes": <int>} for every file the server uploaded.
 MANIFEST_FILENAME = "uploaded.json"
 
+# Lock file guarding read-modify-write of the manifest.
+MANIFEST_LOCK_FILENAME = ".guaipeca-manifest.lock"
+
+# Fallback for platforms with no fcntl/msvcrt, and for the window between the
+# flock release and close.
+_PROCESS_MANIFEST_LOCK = threading.Lock()
+
+
+@contextmanager
+def _manifest_lock(corpus_path: Path):
+    """Hold an exclusive cross-process lock around a manifest read-modify-write.
+
+    Every writer reads the whole manifest, changes one entry and writes the
+    whole file back, so without a lock two concurrent uploads each start from
+    the same base and the last writer erases the other's entry - the document
+    stays on disk with no record, so the API can no longer delete or overwrite
+    it.
+
+    Uses fcntl.flock on POSIX and msvcrt.locking on Windows, the same
+    primitives as CorpusIndex._acquire_lock, but BLOCKING rather than
+    non-blocking: an index run that finds the lock held should refuse, while
+    an upload should wait the fraction of a second the other upload needs.
+    Falls back to a process-local threading lock when neither primitive is
+    importable, so single-process deployments stay correct there.
+
+    The lock file is opened "a+b" (never "w"): truncating a held lock file is
+    rejected by Windows and has broken locking before. It is left in place;
+    it is empty and excluded from document listings by the reserved-name rule.
+    """
+    lock_path = corpus_path / MANIFEST_LOCK_FILENAME
+    try:
+        fd = open(lock_path, "a+b")
+    except OSError as e:
+        logger.warning(
+            f"Could not open manifest lock {lock_path}: {e}; "
+            f"proceeding without a cross-process lock"
+        )
+        with _PROCESS_MANIFEST_LOCK:
+            yield
+        return
+
+    try:
+        try:
+            import fcntl
+        except ImportError:
+            fcntl = None
+
+        try:
+            import msvcrt
+        except ImportError:
+            msvcrt = None
+
+        if fcntl is not None:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+        elif msvcrt is not None:
+            fd.seek(0)
+            msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            logger.warning(
+                "No fcntl/msvcrt available; manifest writes are "
+                "serialised in-process only"
+            )
+            _PROCESS_MANIFEST_LOCK.acquire()
+
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                fd.seek(0)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+    finally:
+        fd.close()
+        if fcntl is None and msvcrt is None and _PROCESS_MANIFEST_LOCK.locked():
+            _PROCESS_MANIFEST_LOCK.release()
+
 
 def _is_reserved_name(filename: str) -> bool:
     """True for names the API must never write or delete.
@@ -50,6 +129,22 @@ def _is_reserved_name(filename: str) -> bool:
         or filename.startswith(".guaipeca")
         or filename.endswith(".tmp")
     )
+
+
+def _entry_sha256(entry) -> str | None:
+    """The recorded checksum of a manifest entry, or None if unreadable.
+
+    A manifest can be hand-edited or half-written, so an entry is not always
+    the dict this module writes. Returning None for anything that is not a
+    dict with a string sha256 keeps the three readers - save_upload's drift
+    warning, delete_upload's corrupt-entry refusal and manifest_status's drift
+    report - from disagreeing about what a corrupt entry means.
+    """
+    if isinstance(entry, dict):
+        sha = entry.get("sha256")
+        if isinstance(sha, str):
+            return sha
+    return None
 
 
 def _read_manifest(corpus_path: Path) -> dict:
@@ -171,6 +266,20 @@ def save_upload(
     if not filename:
         return {"error": "Invalid filename"}
 
+    # A filename longer than the filesystem allows makes every later path
+    # operation raise OSError(ENAMETOOLONG) - including the dest.exists() in
+    # the overwrite check, which sits outside the write's try/except, so a
+    # client-supplied long name would surface as a 500 rather than a refusal.
+    # Check the encoded length up front instead of guessing a constant: the
+    # limit is per path component (255 bytes on ext4), not characters.
+    try:
+        if len(filename.encode("utf-8")) > 255:
+            return {
+                "error": f"Filename too long: '{filename[:40]}...' exceeds 255 bytes"
+            }
+    except UnicodeEncodeError:
+        return {"error": "Invalid filename"}
+
     # Reserved names are refused regardless of manifest state, before any
     # filesystem write.
     if _is_reserved_name(filename):
@@ -180,14 +289,25 @@ def save_upload(
 
     ext = Path(filename).suffix.lower()
     if ext not in config.upload.allowed_extensions:
-        return {
-            "error": f"Extension '{ext}' not allowed. Permitted: {config.upload.allowed_extensions}"
-        }
+        permitted = ", ".join(config.upload.allowed_extensions)
+        return {"error": f"Extension '{ext}' not allowed. Permitted: {permitted}"}
 
     # Check size limit
     if len(content_bytes) > config.upload.max_file_size:
         max_mb = config.upload.max_file_size / (1024 * 1024)
         return {"error": f"File too large ({len(content_bytes)} bytes, max {max_mb:.0f}MB)"}
+
+    # Refuse empty and whitespace-only content. This lives in the shared
+    # core (not the MCP adapter) because the CLI hands save_upload raw
+    # bytes and never touches base64. Checked before any manifest read or
+    # filesystem write so a rejected upload leaves no file, temp file or
+    # manifest entry behind. Always refused; there is no opt-in.
+    if len(content_bytes) == 0:
+        return {"error": f"Refusing empty upload: '{filename}' has no content"}
+    if content_bytes.strip() == b"":
+        return {
+            "error": f"Refusing blank upload: '{filename}' contains only whitespace"
+        }
 
     # Save to corpus directory
     corpus_path = Path(corpus.path)
@@ -204,7 +324,7 @@ def save_upload(
         # file was edited outside the API; re-uploading is the normal fix, so
         # this is a warning, not a refusal.
         entry = manifest[filename]
-        expected = entry.get("sha256") if isinstance(entry, dict) else None
+        expected = _entry_sha256(entry)
         if expected is not None and dest.is_file():
             actual = _sha256_file(dest)
             if actual != expected:
@@ -244,13 +364,18 @@ def save_upload(
     logger.info(f"Uploaded {filename} to corpus '{corpus_name}' ({len(content_bytes)} bytes)")
 
     # Record the upload in the manifest so later overwrites and deletions of
-    # this name are recognized as server-managed.
-    manifest[filename] = {
-        "sha256": hashlib.sha256(content_bytes).hexdigest(),
-        "size_bytes": len(content_bytes),
-    }
+    # this name are recognized as server-managed. Re-read inside the lock:
+    # another upload may have committed an entry while this one was writing
+    # its document, and writing back the stale ``manifest`` read earlier would
+    # erase that entry.
     try:
-        _write_manifest(corpus_path, manifest)
+        with _manifest_lock(corpus_path):
+            fresh = _read_manifest(corpus_path)
+            fresh[filename] = {
+                "sha256": hashlib.sha256(content_bytes).hexdigest(),
+                "size_bytes": len(content_bytes),
+            }
+            _write_manifest(corpus_path, fresh)
     except OSError as e:
         logger.error(f"Failed to write upload manifest in {corpus_path}: {e}")
         return {"error": f"File saved but manifest update failed: {filename}"}
@@ -314,6 +439,17 @@ def delete_upload(
     if not filename:
         return {"error": "Invalid filename"}
 
+    # Same name-length guard as save_upload: an over-long name would raise
+    # ENAMETOOLONG from the resolve/exists calls below instead of returning
+    # the module's error dict.
+    try:
+        if len(filename.encode("utf-8")) > 255:
+            return {
+                "error": f"Filename too long: '{filename[:40]}...' exceeds 255 bytes"
+            }
+    except UnicodeEncodeError:
+        return {"error": "Invalid filename"}
+
     # Reserved names are refused regardless of manifest state.
     if _is_reserved_name(filename):
         return {
@@ -324,9 +460,8 @@ def delete_upload(
     # API can never write is a file the API will never delete.
     ext = Path(filename).suffix.lower()
     if ext not in config.upload.allowed_extensions:
-        return {
-            "error": f"Extension '{ext}' not allowed. Permitted: {config.upload.allowed_extensions}"
-        }
+        permitted = ", ".join(config.upload.allowed_extensions)
+        return {"error": f"Extension '{ext}' not allowed. Permitted: {permitted}"}
 
     corpus_path = Path(corpus.path)
     file_path = corpus_path / filename
@@ -349,7 +484,7 @@ def delete_upload(
                 f"this file (no manifest entry)"
             )
         }
-    if not isinstance(entry, dict) or not isinstance(entry.get("sha256"), str):
+    if _entry_sha256(entry) is None:
         return {
             "error": f"Refusing to delete '{filename}': manifest entry is corrupt"
         }
@@ -386,9 +521,13 @@ def delete_upload(
 
     # Free the name: remove the manifest entry so the filename can be
     # re-uploaded (delete-then-upload cycle) without replace permission.
-    del manifest[filename]
+    # Re-read under the lock so a concurrent upload's entry survives this
+    # write.
     try:
-        _write_manifest(corpus_path, manifest)
+        with _manifest_lock(corpus_path):
+            fresh = _read_manifest(corpus_path)
+            fresh.pop(filename, None)
+            _write_manifest(corpus_path, fresh)
     except OSError as e:
         # The file is already gone; a stale entry is visible via
         # manifest_status and removable via prune_orphans.
@@ -444,11 +583,20 @@ def manifest_status(config: GuaipecaConfig, corpus_name: str) -> dict:
     missing_files = []
     for filename, entry in manifest.items():
         file_path = corpus_path / filename
-        if not file_path.is_file():
+        # A manifest entry can name a path the filesystem cannot even stat
+        # (an over-long name, a name with a NUL from a hand-edited or
+        # partially-written manifest). Reporting must never crash on the data
+        # it is reporting about, so treat those as missing.
+        try:
+            is_file = file_path.is_file()
+        except (OSError, ValueError):
+            missing_files.append(filename)
+            continue
+        if not is_file:
             missing_files.append(filename)
             continue
         tracked += 1
-        expected = entry.get("sha256") if isinstance(entry, dict) else None
+        expected = _entry_sha256(entry)
         actual = _sha256_file(file_path)
         if expected != actual:
             drifted.append({"filename": filename, "expected": expected, "actual": actual})
@@ -511,10 +659,21 @@ def prune_orphans(config: GuaipecaConfig, corpus_name: str, apply: bool) -> dict
 
     removed = []
     if apply and would_remove:
-        for name in would_remove:
-            del manifest[name]
-        _write_manifest(corpus_path, manifest)
-        removed = would_remove
+        try:
+            with _manifest_lock(corpus_path):
+                # Re-read under the lock: another writer may have added or
+                # removed entries since the scan above.
+                fresh = _read_manifest(corpus_path)
+                still_stale = [
+                    name for name in would_remove if not (corpus_path / name).is_file()
+                ]
+                for name in still_stale:
+                    fresh.pop(name, None)
+                _write_manifest(corpus_path, fresh)
+            removed = still_stale
+        except OSError as e:
+            logger.error(f"Failed to write upload manifest in {corpus_path}: {e}")
+            return {"error": f"Failed to prune manifest: {e}"}
 
     return {
         "corpus": corpus_name,

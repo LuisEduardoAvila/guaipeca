@@ -7,6 +7,14 @@ Notable changes to Guaipeca. Format loosely follows
 
 ### Changed
 
+- **Malformed or empty uploads are now refused instead of silently saved.**
+  The MCP `upload` tool decodes its base64 payload strictly: content with
+  characters outside the base64 alphabet is rejected as invalid base64
+  instead of being silently truncated, and empty or whitespace-only content
+  is refused by the shared upload core (so `guaipeca upload` refuses empty
+  and whitespace-only files the same way). A refused upload writes nothing —
+  no file, no temp file, no manifest entry — so the delete-then-upload
+  workflow can no longer replace a real document with an empty one.
 - **Overwriting and deleting files the server did not upload is now refused.**
   The `upload` and `delete` tools (and the `upload`/`delete`/
   `DELETE /documents` endpoints) track every server-uploaded file in a
