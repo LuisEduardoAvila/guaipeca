@@ -50,6 +50,38 @@ Notable changes to Guaipeca. Format loosely follows
 
 ### Fixed
 
+- **CORS preflights advertise only the methods each route actually serves.**
+  The preflight answered every path with a hardcoded `GET, POST, DELETE,
+  OPTIONS`, inviting cross-origin requests that the route would then 405
+  (`/health` and `/tools` serve GET only, `/documents` DELETE only, `/sse` GET
+  only). The list now comes from the app's route table (#73).
+- **A `*` in `server.allowed_origins` is a clean startup error, not a
+  traceback.** The wildcard guard raised `ValueError` but nothing caught it, so
+  `guaipeca serve` printed a raw traceback. The CLI now validates the allowlist
+  before constructing the server (same pre-construction pass as the public-bind
+  refusal) and `serve()` catches it for direct callers: the operator gets
+  `Error: server.allowed_origins entry ... contains '*'` on stderr and exit 1
+  (#74).
+- **A preflight for a path the app does not serve no longer claims success.**
+  The middleware answered every `OPTIONS` with a blanket `204`, telling the
+  browser to proceed with a request that would 404. Unknown paths are now
+  delegated to the app, so the preflight gets the same 404 the real request
+  would (#75).
+- **`Access-Control-Allow-Origin` echoes the matched allowlist entry, not the
+  raw request origin.** A request origin with a trailing slash
+  (`https://ui.example.com/`) matched the allowlist but was echoed verbatim,
+  so the browser saw an ACAO value it did not send and refused the response.
+  The header now carries the allowlist entry, normalised to no trailing slash;
+  with no allowlist the request origin is echoed as before (#76).
+- **Malformed `Origin` headers are rejected before anything is echoed.**
+  An Origin containing control bytes (below 0x21 or 0x7F) or longer than 2048
+  bytes is answered `400` instead of being matched and echoed — a hand-built
+  request could no longer smuggle header bytes into an echoed
+  `Access-Control-Allow-Origin` (#77).
+- **The response carries one `Vary: Origin` header, not two.** When the inner
+  app sent its own `Vary` (e.g. `Accept-Encoding`), the middleware appended a
+  second `Vary` header instead of combining. The values are now merged into a
+  single header, and the inner app's value is preserved (#78).
 - **A modified file no longer leaves stale chunks in the index.** Incremental
   reindexing overwrote a file's stored hash before computing the set of
   deleted files, so a file whose content changed was never cleaned up: its old

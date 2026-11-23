@@ -644,8 +644,14 @@ Push to `main` triggers a GitHub Actions workflow that:
       - http://192.168.1.20:3000
   ```
   Setting `allowed_origins` replaces the loopback default (it does not add to
-  it), so list every origin you need. Allowed origins are echoed back in
-  `Access-Control-Allow-Origin`.
+  it), so list every origin you need. The matched entry is echoed back in
+  `Access-Control-Allow-Origin` (normalised, no trailing slash). Entries are
+  exact matches: a `*` is rejected at startup with a message naming the
+  entry, and an `Origin` header containing control characters or longer than
+  2048 bytes is rejected with `400` before anything is echoed. CORS
+  preflights (`OPTIONS`) advertise only the methods the requested route
+  actually serves (e.g. `GET` on `/health`), and a preflight for a path the
+  app does not serve gets the same `404` the real request would.
 - **HTTP endpoints:**
   - `POST /mcp` — Streamable HTTP transport (MCP protocol version `2025-11-25`); JSON-RPC request in, JSON-RPC response inline. `initialize` issues an `Mcp-Session-Id` header used on subsequent requests. Modern clients should prefer this endpoint. A client may send `MCP-Protocol-Version` on subsequent requests; an absent header is treated as the `2025-03-26` baseline, an unknown value gets `400`.
   - `DELETE /mcp` — terminate a Streamable HTTP session (send the `Mcp-Session-Id` header)

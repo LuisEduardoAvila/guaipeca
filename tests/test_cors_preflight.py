@@ -54,6 +54,16 @@ PREFLIGHT = {
 
 ROUTES = ["/mcp", "/sse", "/health", "/tools"]
 
+# The methods each of the four wrapped routes actually serves (#73): the
+# preflight must advertise these. The old blanket "GET, POST, DELETE, OPTIONS"
+# assertion is exactly what #73 removed - /health and /tools serve GET only.
+_EXPECTED_METHODS = {
+    "/mcp": {"POST", "DELETE"},
+    "/sse": {"GET"},
+    "/health": {"GET"},
+    "/tools": {"GET"},
+}
+
 
 @pytest.mark.parametrize("path", ROUTES)
 def test_preflight_is_answered_on_every_wrapped_route(path):
@@ -69,9 +79,15 @@ def test_preflight_is_answered_on_every_wrapped_route(path):
         f"request unless the preflight is 2xx"
     )
     assert response.headers.get("access-control-allow-origin") == "http://localhost:3000"
-    allow_methods = response.headers.get("access-control-allow-methods", "")
-    assert "POST" in allow_methods.upper()
-    assert "DELETE" in allow_methods.upper()
+    allow_methods = {
+        m.strip().upper()
+        for m in response.headers.get("access-control-allow-methods", "").split(",")
+        if m.strip()
+    }
+    for method in _EXPECTED_METHODS[path]:
+        assert method in allow_methods, (
+            f"{path} preflight dropped {method}: {sorted(allow_methods)}"
+        )
     allow_headers = response.headers.get("access-control-allow-headers", "").lower()
     assert "authorization" in allow_headers
     assert "content-type" in allow_headers
