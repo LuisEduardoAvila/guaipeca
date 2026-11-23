@@ -85,7 +85,9 @@ def test_save_upload_indexes_when_requested(tmp_path):
 
 def test_delete_upload_removes_file(tmp_path):
     config = _config(tmp_path)
-    (tmp_path / "note.md").write_bytes(b"hello")
+    # The file must be server-uploaded first: deleting a file the server did
+    # not upload (no manifest entry) is now refused.
+    save_upload(config, "uploads", "note.md", b"hello", do_index=False)
     result = delete_upload(config, "uploads", "note.md", do_index=False)
     assert result["deleted"] is True
     assert not (tmp_path / "note.md").exists()
@@ -99,7 +101,8 @@ def test_delete_upload_missing_file(tmp_path):
 
 def test_delete_upload_reindexes_when_requested(tmp_path):
     config = _config(tmp_path)
-    (tmp_path / "note.md").write_bytes(b"hello")
+    # Upload through the API first so the file has a manifest entry.
+    save_upload(config, "uploads", "note.md", b"hello", do_index=False)
     searcher = FakeSearcher()
     result = delete_upload(config, "uploads", "note.md", do_index=True, searcher=searcher)
     assert result["indexed"] is True

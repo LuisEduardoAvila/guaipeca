@@ -141,7 +141,7 @@
       "name": "list_folders"
     },
     {
-      "description": "Upload a file to a corpus for conversion and indexing. The file content must be base64-encoded. Only corpora configured in upload.allow can receive files.",
+      "description": "Upload a file to a corpus for conversion and indexing. The file content must be base64-encoded. Only corpora configured in upload.allow can receive files. Overwriting an existing filename is refused unless the server uploaded that file itself (it is tracked in the upload manifest) or the corpus sets upload.replace to true.",
       "inputSchema": {
         "properties": {
           "content": {
@@ -192,7 +192,7 @@
       "name": "get_toc"
     },
     {
-      "description": "Delete a file from a corpus that accepts uploads. Only corpora configured in upload.allow can have files deleted. The corpus is re-indexed after deletion to remove stale chunks.",
+      "description": "Delete a file from a corpus that accepts uploads. Only corpora configured in upload.allow can have files deleted, and only files the server uploaded itself (tracked in the upload manifest) may be deleted. A file whose content was edited outside the API is refused as drift. The corpus is re-indexed after deletion to remove stale chunks.",
       "inputSchema": {
         "properties": {
           "corpus": {
@@ -216,6 +216,43 @@
         "type": "object"
       },
       "name": "delete"
+    },
+    {
+      "description": "Show the upload-manifest state of a corpus: how many server-uploaded files are tracked, which tracked files drifted (edited outside the API), which files on disk were never uploaded through the server (orphans), and which manifest entries have no file left. Read-only; changes nothing.",
+      "inputSchema": {
+        "properties": {
+          "corpus": {
+            "description": "Single corpus name (not a list); must be in upload.allow.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "corpus"
+        ],
+        "type": "object"
+      },
+      "name": "uploads_status"
+    },
+    {
+      "description": "Remove stale upload-manifest entries (entries whose file no longer exists on disk). Never deletes files: orphan files on disk are left alone. Dry run by default - pass apply=true to actually rewrite the manifest.",
+      "inputSchema": {
+        "properties": {
+          "apply": {
+            "default": false,
+            "description": "If true, remove the stale entries. Default: false (dry run).",
+            "type": "boolean"
+          },
+          "corpus": {
+            "description": "Single corpus name (not a list); must be in upload.allow.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "corpus"
+        ],
+        "type": "object"
+      },
+      "name": "uploads_prune"
     }
   ]
 }

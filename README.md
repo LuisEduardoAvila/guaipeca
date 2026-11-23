@@ -153,6 +153,8 @@ upload:
   max_file_size: 52428800  # 50MB
   allowed_extensions: [.md, .txt, .pdf, .docx]
   auto_index: true  # index after upload
+  # replace:                  # per-corpus permission to overwrite a file the
+  #   epm-docs: true          # server did not upload itself (default: refused)
 
 # Search configuration (optional — all values have safe defaults)
 search:
@@ -340,7 +342,7 @@ list_folders()
 ```
 
 ### upload
-Upload a file to a corpus for conversion and indexing. File content must be base64-encoded. Only corpora listed in `upload.allow` can receive files.
+Upload a file to a corpus for conversion and indexing. File content must be base64-encoded. Only corpora listed in `upload.allow` can receive files. The server records every upload in a per-corpus manifest (`uploaded.json`); overwriting an existing filename is refused unless the server uploaded that file itself or the corpus sets `upload.replace` to `true`.
 ```
 upload(corpus="epm-docs", filename="report.pdf", content="<base64>", index=true)
 ```
@@ -353,9 +355,21 @@ get_toc(corpus="epm-docs", document="/path/to/report.md")
 ```
 
 ### delete
-Delete a file from a corpus that accepts uploads. Only corpora listed in `upload.allow` can have files deleted. The corpus is re-indexed after deletion to remove stale chunks.
+Delete a file from a corpus that accepts uploads. Only corpora listed in `upload.allow` can have files deleted, and only files the server uploaded itself (tracked in the upload manifest) may be deleted. A file whose content was edited outside the API is refused as drift. The corpus is re-indexed after deletion to remove stale chunks.
 ```
 delete(corpus="epm-docs", filename="report.pdf", index=true)
+```
+
+### uploads_status
+Show the upload-manifest state of a corpus: tracked files, drifted files (edited outside the API), orphan files on disk that were never uploaded through the server, and manifest entries with no file left. Read-only.
+```
+uploads_status(corpus="epm-docs")
+```
+
+### uploads_prune
+Remove stale upload-manifest entries (entries whose file no longer exists on disk). Never deletes files. Dry run by default; pass `apply=true` to rewrite the manifest.
+```
+uploads_prune(corpus="epm-docs", apply=false)
 ```
 
 ### ToC-Aware Search Features
@@ -387,14 +401,17 @@ guaipeca list-folders                  # List upload-enabled corpora
 guaipeca get-toc --corpus C [--document /abs/file.md]  # Table of contents
 guaipeca upload --corpus C <file>      # Upload a file and index it
 guaipeca delete --corpus C <filename>  # Delete a file and re-index
+guaipeca uploads-status --corpus C [--json]  # Show upload manifest status
+guaipeca uploads-prune --corpus C [--apply] [--json]  # Prune stale manifest entries
 guaipeca serve [--transport both] [--port 8090]  # Start MCP server
 ```
 
 The CLI mirrors the MCP tools one-for-one (except `serve`, which is
 CLI-only). The read/upload/delete commands (`get-chunk`, `get-document`,
 `list-documents`, `list-folders`, `get-toc`, `upload`, `delete`) print the
-same JSON payloads the MCP server returns by default. The three most-scripted
-commands — `search`, `status`, and `index` — print human-readable text by
+same JSON payloads the MCP server returns by default. The most-scripted
+commands — `search`, `status`, `index`, `uploads-status`, and `uploads-prune`
+— print human-readable text by
 default and accept `--json` to print the same JSON payload instead. On an
 error payload they exit 1, write to stderr, and leave stdout empty, so the
 output is safe to pipe into `jq`. For `index` that covers a corpus that could
@@ -637,7 +654,7 @@ Push to `main` triggers a GitHub Actions workflow that:
   - `GET /health` — health check
   - `GET /tools` — list available tools
   - `GET /download/{corpus}/{filename}` — download original file (requires auth, path traversal protected)
-  - `DELETE /documents?corpus=<name>&filename=<name>` — delete a file from an upload-enabled corpus (requires auth)
+  - `DELETE /documents?corpus=<name>&filename=<name>` — delete a file from an upload-enabled corpus (requires auth); only files the server uploaded itself (tracked in the corpus `uploaded.json` manifest) can be deleted, same rules as the `delete` tool
 - **Error messages:** Client error responses are sanitized to avoid leaking
   internal file paths or library details.
 

@@ -1,6 +1,6 @@
 """MCP server for Guaipeca.
 
-Exposes ten tools via Model Context Protocol:
+Exposes twelve tools via Model Context Protocol:
 - search: semantic search across corpora (returns summary + location)
 - get_chunk: retrieve full chunk text by chunk_id
 - get_document: retrieve full document text by corpus and source_path
@@ -11,6 +11,8 @@ Exposes ten tools via Model Context Protocol:
 - upload: upload a file to a corpus for conversion and indexing
 - delete: delete a file from an upload-enabled corpus
 - get_toc: get table of contents for a corpus or document
+- uploads_status: show the upload-manifest state of a corpus
+- uploads_prune: remove stale upload-manifest entries (dry run by default)
 
 Transports:
 - stdio: newline-delimited JSON-RPC over stdin/stdout
@@ -36,7 +38,13 @@ from .config import GuaipecaConfig
 from .converter import Converter
 from .embedding import EmbeddingService
 from .search import Searcher
-from .uploads import delete_upload, list_upload_folders, save_upload
+from .uploads import (
+    delete_upload,
+    list_upload_folders,
+    manifest_status,
+    prune_orphans,
+    save_upload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -308,7 +316,10 @@ TOOLS = [
         "description": (
             "Upload a file to a corpus for conversion and indexing. "
             "The file content must be base64-encoded. "
-            "Only corpora configured in upload.allow can receive files."
+            "Only corpora configured in upload.allow can receive files. "
+            "Overwriting an existing filename is refused unless the server "
+            "uploaded that file itself (it is tracked in the upload manifest) "
+            "or the corpus sets upload.replace to true."
         ),
         "inputSchema": {
             "type": "object",
@@ -361,8 +372,11 @@ TOOLS = [
         "name": "delete",
         "description": (
             "Delete a file from a corpus that accepts uploads. "
-            "Only corpora configured in upload.allow can have files deleted. "
-            "The corpus is re-indexed after deletion to remove stale chunks."
+            "Only corpora configured in upload.allow can have files deleted, "
+            "and only files the server uploaded itself (tracked in the upload "
+            "manifest) may be deleted. A file whose content was edited outside "
+            "the API is refused as drift. The corpus is re-indexed after "
+            "deletion to remove stale chunks."
         ),
         "inputSchema": {
             "type": "object",
@@ -384,6 +398,50 @@ TOOLS = [
                 },
             },
             "required": ["corpus", "filename"],
+        },
+    },
+    {
+        "name": "uploads_status",
+        "description": (
+            "Show the upload-manifest state of a corpus: how many server-"
+            "uploaded files are tracked, which tracked files drifted (edited "
+            "outside the API), which files on disk were never uploaded through "
+            "the server (orphans), and which manifest entries have no file "
+            "left. Read-only; changes nothing."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "corpus": {
+                    "type": "string",
+                    "description": "Single corpus name (not a list); must be in upload.allow.",
+                },
+            },
+            "required": ["corpus"],
+        },
+    },
+    {
+        "name": "uploads_prune",
+        "description": (
+            "Remove stale upload-manifest entries (entries whose file no "
+            "longer exists on disk). Never deletes files: orphan files on "
+            "disk are left alone. Dry run by default - pass apply=true to "
+            "actually rewrite the manifest."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "corpus": {
+                    "type": "string",
+                    "description": "Single corpus name (not a list); must be in upload.allow.",
+                },
+                "apply": {
+                    "type": "boolean",
+                    "description": "If true, remove the stale entries. Default: false (dry run).",
+                    "default": False,
+                },
+            },
+            "required": ["corpus"],
         },
     },
 ]
@@ -672,6 +730,21 @@ class GuaipecaMCPServer:
             filename = arguments.get("filename", "")
             do_index = arguments.get("index", self.config.upload.auto_index)
             result = self._handle_delete(corpus, filename, do_index)
+            if result.get("error"):
+                return self._error_result(result["error"])
+            return self._result_to_mcp(result)
+
+        elif tool_name == "uploads_status":
+            corpus = arguments.get("corpus", "")
+            result = manifest_status(self.config, corpus)
+            if result.get("error"):
+                return self._error_result(result["error"])
+            return self._result_to_mcp(result)
+
+        elif tool_name == "uploads_prune":
+            corpus = arguments.get("corpus", "")
+            apply = arguments.get("apply", False)
+            result = prune_orphans(self.config, corpus, apply=apply)
             if result.get("error"):
                 return self._error_result(result["error"])
             return self._result_to_mcp(result)

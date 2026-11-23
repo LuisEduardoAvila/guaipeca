@@ -103,6 +103,11 @@ upload:
     - .htm
     - .csv
   auto_index: true                 # index the corpus automatically after upload
+  # replace:                       # per-corpus permission to overwrite a file
+    # epm-docs: true               # the server did not upload itself. Absent or
+    #                              # false (the default) refuses such overwrites;
+    #                              # re-uploading a server-uploaded file is always
+    #                              # allowed.
 
 # Search configuration
 # Hybrid BM25 + FAISS search with Reciprocal Rank Fusion (RRF)

@@ -12,6 +12,8 @@ Commands:
   guaipeca get-toc --corpus C [--document P]  Show table of contents
   guaipeca upload --corpus C <file>    Upload a file for indexing
   guaipeca delete --corpus C <filename>  Delete a file and re-index
+  guaipeca uploads-status --corpus C [--json]  Show upload manifest status
+  guaipeca uploads-prune --corpus C [--apply] [--json]  Prune stale manifest entries
   guaipeca --check-model              Check/download embedding model
 
 The MCP server exposes the same read/write capabilities as tools; the CLI
@@ -101,6 +103,8 @@ MCP_TOOL_TO_CLI = {
     "get_toc": "get-toc",
     "upload": "upload",
     "delete": "delete",
+    "uploads_status": "uploads-status",
+    "uploads_prune": "uploads-prune",
 }
 
 # Maps every property of the MCP ``search`` inputSchema to the argparse dest it
@@ -583,6 +587,74 @@ def cmd_delete(args):
     _emit(result)
 
 
+def cmd_uploads_status(args):
+    """Show the upload-manifest status for a corpus (mirrors MCP uploads_status)."""
+    from .uploads import manifest_status
+
+    config = _load_config(args.config)
+
+    result = manifest_status(config, args.corpus)
+    if args.json:
+        _emit(result)
+        return
+
+    if "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\nUpload manifest: corpus '{result['corpus']}'")
+    print(f"  Tracked files: {result['tracked']}")
+    if result["drifted"]:
+        print(f"  Drifted: {len(result['drifted'])}")
+        for d in result["drifted"]:
+            print(f"    - {d['filename']} (expected {d['expected']}, found {d['actual']})")
+    else:
+        print("  Drifted: 0")
+    if result["orphan_files"]:
+        print(f"  Orphan files (never uploaded via the server): {len(result['orphan_files'])}")
+        for name in result["orphan_files"]:
+            print(f"    - {name}")
+    else:
+        print("  Orphan files: 0")
+    if result["missing_files"]:
+        print(f"  Manifest entries with no file: {len(result['missing_files'])}")
+        for name in result["missing_files"]:
+            print(f"    - {name}")
+    else:
+        print("  Manifest entries with no file: 0")
+    print()
+
+
+def cmd_uploads_prune(args):
+    """Remove stale upload-manifest entries (mirrors MCP uploads_prune)."""
+    from .uploads import prune_orphans
+
+    config = _load_config(args.config)
+
+    result = prune_orphans(config, args.corpus, apply=args.apply)
+    if args.json:
+        _emit(result)
+        return
+
+    if "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    mode = "dry run" if result["dry_run"] else "applied"
+    print(f"\nPrune stale manifest entries: corpus '{result['corpus']}' ({mode})")
+    if result["would_remove"]:
+        print(f"  Stale entries: {len(result['would_remove'])}")
+        for name in result["would_remove"]:
+            print(f"    - {name}")
+    else:
+        print("  Stale entries: 0")
+    if result["removed"]:
+        print(f"  Removed: {len(result['removed'])}")
+        for name in result["removed"]:
+            print(f"    - {name}")
+    print()
+
+
 def cmd_check_model(args):
     """Check if the embedding model is cached locally, download if needed."""
     config = _load_config(args.config)
@@ -770,6 +842,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-index", action="store_true", help="Skip re-indexing after deletion"
     )
     p_delete.set_defaults(func=cmd_delete)
+
+    # uploads-status
+    p_uploads_status = subparsers.add_parser(
+        "uploads-status", help="Show the upload-manifest status for a corpus"
+    )
+    p_uploads_status.add_argument("--corpus", required=True, help="Corpus name")
+    p_uploads_status.add_argument(
+        "--json", action="store_true", help="Print the result as JSON instead of text"
+    )
+    p_uploads_status.set_defaults(func=cmd_uploads_status)
+
+    # uploads-prune
+    p_uploads_prune = subparsers.add_parser(
+        "uploads-prune",
+        help="Remove stale upload-manifest entries (dry run without --apply)",
+    )
+    p_uploads_prune.add_argument("--corpus", required=True, help="Corpus name")
+    p_uploads_prune.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually remove the stale entries (default: dry run)",
+    )
+    p_uploads_prune.add_argument(
+        "--json", action="store_true", help="Print the result as JSON instead of text"
+    )
+    p_uploads_prune.set_defaults(func=cmd_uploads_prune)
 
     return parser
 
