@@ -9,6 +9,7 @@
             "items": {
               "type": "string"
             },
+            "maxItems": 20,
             "type": "array"
           },
           "hybrid": {
@@ -31,6 +32,11 @@
           "return_mode": {
             "default": "chunks",
             "description": "Result granularity: 'chunks' returns individual chunks (default), 'documents' returns full source documents deduplicated by path, 'auto' returns chunks if total size < max_chars threshold, otherwise documents.",
+            "enum": [
+              "chunks",
+              "documents",
+              "auto"
+            ],
             "type": "string"
           },
           "section_filter": {
@@ -45,6 +51,7 @@
           "top_k": {
             "default": 5,
             "description": "Number of results to return (default: 5).",
+            "maximum": 200,
             "type": "integer"
           }
         },

@@ -274,6 +274,12 @@ search(query="revenue", section_filter="Financial Statements")
 - `documents` — returns full source documents, deduplicated by path, with best chunk score as document score
 - `auto` — returns chunks if total result size < `search.max_chars` (default 8000), otherwise collapses to documents
 
+**Argument validation:** `top_k` must be an integer — a numeric string like
+`"5"` is coerced — and is clamped to 1–200; `corpora` must be a list of corpus
+names (a bare string is treated as a one-element list); `return_mode` must be
+`chunks`, `documents` or `auto`. Invalid values are rejected with an error
+naming the offending argument.
+
 **max_distance** sets a relevance floor for dense hits, so an off-topic query can return an
 empty result set instead of the least-bad chunk:
 
@@ -662,7 +668,10 @@ Push to `main` triggers a GitHub Actions workflow that:
   - `GET /download/{corpus}/{filename}` — download original file (requires auth, path traversal protected)
   - `DELETE /documents?corpus=<name>&filename=<name>` — delete a file from an upload-enabled corpus (requires auth); only files the server uploaded itself (tracked in the corpus `uploaded.json` manifest) can be deleted, same rules as the `delete` tool
 - **Error messages:** Client error responses are sanitized to avoid leaking
-  internal file paths or library details.
+  internal file paths or library details. A tool call that raises internally
+  (searcher or adapter error) is logged with the full traceback server-side
+  and returned to the client as a sanitised error result — no absolute paths,
+  no exception class names — rather than the raw exception.
 
 ## License
 

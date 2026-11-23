@@ -101,9 +101,16 @@ class TestCorpusEnum:
         assert index["inputSchema"]["properties"]["corpus"]["enum"] == ["a", "all"]
 
     def test_global_tools_are_unchanged(self):
-        """TOOLS is module-level and shared; enum injection must not mutate it."""
+        """TOOLS is module-level and shared; enum injection must not mutate it.
+
+        Compared by value rather than by the absence of "enum": the search
+        schema carries a static return_mode enum, so the word legitimately
+        appears in TOOLS; what must not happen is the injection writing into
+        it.
+        """
+        before = json.dumps(TOOLS, sort_keys=True)
         _server(["x"])._tools_with_corpus_enum()
-        assert "enum" not in json.dumps(TOOLS)
+        assert json.dumps(TOOLS, sort_keys=True) == before
 
     def test_falls_back_when_corpora_unavailable(self):
         server = GuaipecaMCPServer.__new__(GuaipecaMCPServer)

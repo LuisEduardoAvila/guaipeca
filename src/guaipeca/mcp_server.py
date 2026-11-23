@@ -28,6 +28,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import threading
 import urllib.parse
 from pathlib import Path
@@ -149,10 +150,12 @@ TOOLS = [
                     "type": "integer",
                     "description": "Number of results to return (default: 5).",
                     "default": 5,
+                    "maximum": 200,
                 },
                 "corpora": {
                     "type": "array",
                     "items": {"type": "string"},
+                    "maxItems": 20,
                     "description": (
                         "LIST of corpus names to search, e.g. [\"epm-docs\"]. "
                         "Other tools take corpus=\"name\" (singular); this one is "
@@ -176,6 +179,7 @@ TOOLS = [
                         "otherwise documents."
                     ),
                     "default": "chunks",
+                    "enum": ["chunks", "documents", "auto"],
                 },
                 "max_chars": {
                     "type": "integer",
@@ -467,6 +471,30 @@ def _sanitize_error_message(exc: Exception) -> str:
     return msg
 
 
+# Path-like runs in an exception message: 3+ segments, or 2 segments ending
+# in a file extension. Shorter slash-prefixed tokens ("/mcp", "/api/v1") are
+# not filesystem paths and are left alone.
+_CLIENT_PATH_RE = re.compile(
+    r"(?:^|[\s(:=])/(?:[\w.-]+/){2,}[\w.-]+|(?:^|[\s(:=])/[\w.-]+/[\w-]+\.[A-Za-z0-9]+"
+)
+
+
+def _client_error_message(exc: Exception) -> str:
+    """Build a client-safe message for an exception raised inside a tool call.
+
+    The full exception (with traceback) is logged server-side; what reaches
+    the client must not leak filesystem layout or internal type names. The
+    message is taken from ``str(exc)`` only (the exception class name is
+    never included), absolute file paths are replaced with a placeholder, and
+    the result is truncated.
+    """
+    msg = str(exc) or "internal error"
+    msg = _CLIENT_PATH_RE.sub(" [path]", msg)
+    if len(msg) > 300:
+        msg = msg[:300] + "..."
+    return msg
+
+
 def _check_model_cached(embedder: EmbeddingService) -> bool:
     """Check if the embedding model is cached locally.
 
@@ -648,109 +676,149 @@ class GuaipecaMCPServer:
         if rejection is not None:
             return rejection
 
-        if tool_name == "search":
-            query = arguments.get("query", "")
-            top_k = arguments.get("top_k", 5)
-            corpora = arguments.get("corpora")
-            hybrid = arguments.get("hybrid")
-            return_mode = arguments.get("return_mode", "chunks")
-            max_chars = arguments.get("max_chars")
-            section_mode = arguments.get("section_mode", False)
-            section_filter = arguments.get("section_filter")
-            max_distance = arguments.get("max_distance")
-            result = self.searcher.search(
-                query, top_k=top_k, corpora=corpora, hybrid=hybrid,
-                return_mode=return_mode, max_chars=max_chars,
-                section_mode=section_mode, section_filter=section_filter,
-                max_distance=max_distance,
-            )
-            # search() reports validation failures as {"results": [], "error": ...}.
-            # Returning that as a success made a wrong corpus name look like a
-            # valid zero-hit search, which a client cannot distinguish.
-            if isinstance(result, dict) and result.get("error"):
-                return self._error_result(result["error"])
-            return self._result_to_mcp(result)
-
-        elif tool_name == "get_chunk":
-            chunk_id = arguments.get("chunk_id", "")
-            result = self.searcher.get_chunk(chunk_id)
-            if result is None:
-                return self._error_result(f"Chunk not found: {chunk_id}")
-            return self._result_to_mcp(result)
-
-        elif tool_name == "get_document":
-            corpus = arguments.get("corpus", "")
-            source_path = arguments.get("source_path", "")
-            result = self.searcher.get_document(corpus, source_path)
-            if result is None:
-                return self._error_result(
-                    f"Document not found: {source_path} in corpus {corpus}"
+        try:
+            if tool_name == "search":
+                query = arguments.get("query", "")
+                top_k = arguments.get("top_k", 5)
+                if isinstance(top_k, bool) or not isinstance(top_k, (int, str)):
+                    return self._error_result(
+                        f"top_k must be an integer, got {type(top_k).__name__}"
+                    )
+                if isinstance(top_k, str):
+                    # A numeric string ("5") is a common client slip; coerce
+                    # it instead of letting int math raise a TypeError later.
+                    try:
+                        top_k = int(top_k)
+                    except ValueError:
+                        return self._error_result(
+                            f"top_k must be an integer, got {top_k!r}"
+                        )
+                top_k = max(1, min(200, top_k))
+                corpora = arguments.get("corpora")
+                if isinstance(corpora, str):
+                    # A bare string would otherwise be iterated character by
+                    # character, searching one-character "corpora".
+                    corpora = [corpora]
+                elif corpora is not None and (
+                    not isinstance(corpora, list)
+                    or not all(isinstance(c, str) for c in corpora)
+                ):
+                    return self._error_result(
+                        f"corpora must be a list of corpus names, got {corpora!r}"
+                    )
+                hybrid = arguments.get("hybrid")
+                return_mode = arguments.get("return_mode", "chunks")
+                if return_mode not in ("chunks", "documents", "auto"):
+                    return self._error_result(
+                        "return_mode must be one of 'chunks', 'documents' or "
+                        f"'auto', got {return_mode!r}"
+                    )
+                max_chars = arguments.get("max_chars")
+                section_mode = arguments.get("section_mode", False)
+                section_filter = arguments.get("section_filter")
+                max_distance = arguments.get("max_distance")
+                result = self.searcher.search(
+                    query, top_k=top_k, corpora=corpora, hybrid=hybrid,
+                    return_mode=return_mode, max_chars=max_chars,
+                    section_mode=section_mode, section_filter=section_filter,
+                    max_distance=max_distance,
                 )
-            return self._result_to_mcp(result)
+                # search() reports validation failures as {"results": [], "error": ...}.
+                # Returning that as a success made a wrong corpus name look like a
+                # valid zero-hit search, which a client cannot distinguish.
+                if isinstance(result, dict) and result.get("error"):
+                    return self._error_result(result["error"])
+                return self._result_to_mcp(result)
 
-        elif tool_name == "list_documents":
-            corpus = arguments.get("corpus")
-            result = self.searcher.list_documents(corpus=corpus)
-            if "error" in result:
-                return self._error_result(result["error"])
-            return self._result_to_mcp(result)
+            elif tool_name == "get_chunk":
+                chunk_id = arguments.get("chunk_id", "")
+                result = self.searcher.get_chunk(chunk_id)
+                if result is None:
+                    return self._error_result(f"Chunk not found: {chunk_id}")
+                return self._result_to_mcp(result)
 
-        elif tool_name == "index":
-            corpus = arguments.get("corpus", "all")
-            force = arguments.get("force", False)
-            result = self.searcher.index_corpus(corpus_name=corpus, force=force)
-            return self._result_to_mcp(result)
+            elif tool_name == "get_document":
+                corpus = arguments.get("corpus", "")
+                source_path = arguments.get("source_path", "")
+                result = self.searcher.get_document(corpus, source_path)
+                if result is None:
+                    return self._error_result(
+                        f"Document not found: {source_path} in corpus {corpus}"
+                    )
+                return self._result_to_mcp(result)
 
-        elif tool_name == "status":
-            return self._result_to_mcp(self.searcher.status)
+            elif tool_name == "list_documents":
+                corpus = arguments.get("corpus")
+                result = self.searcher.list_documents(corpus=corpus)
+                if "error" in result:
+                    return self._error_result(result["error"])
+                return self._result_to_mcp(result)
 
-        elif tool_name == "list_folders":
-            return self._result_to_mcp(self._list_upload_folders())
+            elif tool_name == "index":
+                corpus = arguments.get("corpus", "all")
+                force = arguments.get("force", False)
+                result = self.searcher.index_corpus(corpus_name=corpus, force=force)
+                return self._result_to_mcp(result)
 
-        elif tool_name == "upload":
-            corpus = arguments.get("corpus", "")
-            filename = arguments.get("filename", "")
-            content_b64 = arguments.get("content", "")
-            do_index = arguments.get("index", self.config.upload.auto_index)
-            result = self._handle_upload(corpus, filename, content_b64, do_index)
-            if result.get("error"):
-                return self._error_result(result["error"])
-            return self._result_to_mcp(result)
+            elif tool_name == "status":
+                return self._result_to_mcp(self.searcher.status)
 
-        elif tool_name == "get_toc":
-            corpus = arguments.get("corpus", "")
-            document = arguments.get("document")
-            result = self.searcher.get_toc(corpus=corpus, document=document)
-            if "error" in result:
-                return self._error_result(result["error"])
-            return self._result_to_mcp(result)
+            elif tool_name == "list_folders":
+                return self._result_to_mcp(self._list_upload_folders())
 
-        elif tool_name == "delete":
-            corpus = arguments.get("corpus", "")
-            filename = arguments.get("filename", "")
-            do_index = arguments.get("index", self.config.upload.auto_index)
-            result = self._handle_delete(corpus, filename, do_index)
-            if result.get("error"):
-                return self._error_result(result["error"])
-            return self._result_to_mcp(result)
+            elif tool_name == "upload":
+                corpus = arguments.get("corpus", "")
+                filename = arguments.get("filename", "")
+                content_b64 = arguments.get("content", "")
+                do_index = arguments.get("index", self.config.upload.auto_index)
+                result = self._handle_upload(corpus, filename, content_b64, do_index)
+                if result.get("error"):
+                    return self._error_result(result["error"])
+                return self._result_to_mcp(result)
 
-        elif tool_name == "uploads_status":
-            corpus = arguments.get("corpus", "")
-            result = manifest_status(self.config, corpus)
-            if result.get("error"):
-                return self._error_result(result["error"])
-            return self._result_to_mcp(result)
+            elif tool_name == "get_toc":
+                corpus = arguments.get("corpus", "")
+                document = arguments.get("document")
+                result = self.searcher.get_toc(corpus=corpus, document=document)
+                if "error" in result:
+                    return self._error_result(result["error"])
+                return self._result_to_mcp(result)
 
-        elif tool_name == "uploads_prune":
-            corpus = arguments.get("corpus", "")
-            apply = arguments.get("apply", False)
-            result = prune_orphans(self.config, corpus, apply=apply)
-            if result.get("error"):
-                return self._error_result(result["error"])
-            return self._result_to_mcp(result)
+            elif tool_name == "delete":
+                corpus = arguments.get("corpus", "")
+                filename = arguments.get("filename", "")
+                do_index = arguments.get("index", self.config.upload.auto_index)
+                result = self._handle_delete(corpus, filename, do_index)
+                if result.get("error"):
+                    return self._error_result(result["error"])
+                return self._result_to_mcp(result)
 
-        else:
-            return self._error_result(f"Unknown tool: {tool_name}")
+            elif tool_name == "uploads_status":
+                corpus = arguments.get("corpus", "")
+                result = manifest_status(self.config, corpus)
+                if result.get("error"):
+                    return self._error_result(result["error"])
+                return self._result_to_mcp(result)
+
+            elif tool_name == "uploads_prune":
+                corpus = arguments.get("corpus", "")
+                apply = arguments.get("apply", False)
+                result = prune_orphans(self.config, corpus, apply=apply)
+                if result.get("error"):
+                    return self._error_result(result["error"])
+                return self._result_to_mcp(result)
+
+            else:
+                return self._error_result(f"Unknown tool: {tool_name}")
+        except Exception as exc:
+            # The searcher and the upload adapters raise freely (OSError,
+            # KeyError, model errors). A raw exception would leak filesystem
+            # paths and internals to the client, so log the full detail here
+            # and return a sanitised message instead.
+            logger.error(
+                "Error handling tool call %r: %s", tool_name, exc, exc_info=True
+            )
+            return self._error_result(_client_error_message(exc))
 
     @staticmethod
     def _result_to_mcp(result: Any) -> dict:

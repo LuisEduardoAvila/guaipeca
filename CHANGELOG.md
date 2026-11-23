@@ -50,6 +50,20 @@ Notable changes to Guaipeca. Format loosely follows
 
 ### Fixed
 
+- **MCP `search` arguments are validated, and tool exceptions no longer leak
+  to clients.** A numeric string for `top_k` (e.g. `"5"`) is coerced to an
+  integer and out-of-range values are clamped to 1..200; a non-numeric value
+  is rejected with an error naming `top_k` instead of raising a `TypeError`
+  out of the handler. A bare string for `corpora` is wrapped in a one-element
+  list (it was previously iterated character by character, searching
+  one-character "corpora"), and non-string list entries are rejected with an
+  error naming `corpora`. `return_mode` must be `chunks`, `documents` or
+  `auto`; anything else is rejected with an error naming `return_mode`. The
+  tool schema now advertises the constraints (`maximum`, `maxItems`, `enum`).
+  Any exception raised by the searcher or the upload adapters is logged with
+  the full traceback server-side and returned to the client as a sanitised
+  error result — no absolute paths, no exception class name — instead of the
+  raw exception (#55).
 - **CORS preflights advertise only the methods each route actually serves.**
   The preflight answered every path with a hardcoded `GET, POST, DELETE,
   OPTIONS`, inviting cross-origin requests that the route would then 405
