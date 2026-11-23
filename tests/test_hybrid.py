@@ -273,7 +273,9 @@ class TestConfigHybrid:
         config_path.write_text(yaml.dump(config_data))
 
         cfg = GuaipecaConfig.from_yaml(str(config_path))
-        assert cfg.search.hybrid is False
+        # #67: the dataclass default (True) is the single source of truth;
+        # the loader used to restate it as False and win.
+        assert cfg.search.hybrid is True
         assert cfg.search.bm25_weight == 1.0
         assert cfg.search.dense_weight == 1.0
         assert cfg.search.rrf_k == 60
@@ -281,7 +283,7 @@ class TestConfigHybrid:
     def test_config_hybrid_overrides_param(self, indexed_corpus):
         """Explicit hybrid param should override config."""
         searcher = indexed_corpus
-        # Config has hybrid=False (default), pass hybrid=True
+        # Config has hybrid=False (pinned in the fixture config), pass hybrid=True
         result = searcher.search("consolidation", top_k=5, hybrid=True)
         assert result.get("hybrid") is True
 

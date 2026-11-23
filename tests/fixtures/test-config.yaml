@@ -27,3 +27,8 @@ indexing:
   incremental: true
   max_file_size: 52428800
   exclude_dirs: ["node_modules", ".git", "venv", "__pycache__"]
+
+# Explicitly pinned (not the default): the shared integration fixtures test
+# dense-only backward compatibility, and #67 made the dataclass default True.
+search:
+  hybrid: false
