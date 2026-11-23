@@ -839,8 +839,17 @@ class GuaipecaMCPServer:
         # alphabet instead of silently dropping it: a lenient decode turns
         # junk into a shorter or empty payload that would be saved as a
         # corrupted (or blank) document.
+        #
+        # Whitespace is stripped first, and only whitespace. validate=True
+        # rejects newlines, so MIME-style payloads wrapped at 76 columns (the
+        # base64 CLI default, and what several SDKs emit) would be refused - in
+        # the documented delete-then-upload flow that refusal lands AFTER the
+        # original was deleted, turning non-atomicity into real document loss.
+        # Stripping whitespace keeps the strictness that matters: a character
+        # that is not in the alphabet and not whitespace is still an error.
         try:
-            content_bytes = base64.b64decode(content_b64, validate=True)
+            payload = "".join(content_b64.split()) if isinstance(content_b64, str) else content_b64
+            content_bytes = base64.b64decode(payload, validate=True)
         except Exception:
             return {"error": "Invalid base64 content"}
 

@@ -281,6 +281,17 @@ class GuaipecaConfig:
                 f"upload.replace must be a mapping of corpus name to boolean, "
                 f"got: {replace!r}"
             )
+        # Require real booleans. bool() would turn the string "false" and the
+        # string "0" into True, silently granting overwrite authority the
+        # operator wrote as false - so a coerced value is an error, not a
+        # convenience.
+        for name, flag in replace.items():
+            if not isinstance(flag, bool):
+                raise ValueError(
+                    f"upload.replace[{name!r}] must be true or false, "
+                    f"got: {flag!r}. Quote-free booleans only - the string "
+                    f"\"false\" reads as true and would enable overwriting."
+                )
         upload = UploadConfig(
             allow=upl.get("allow", []),
             max_file_size=upl.get("max_file_size", 52428800),
@@ -291,7 +302,7 @@ class GuaipecaConfig:
                                     ".pptx", ".ppt", ".xlsx", ".xls", ".html", ".htm", ".csv"])
             ],
             auto_index=upl.get("auto_index", True),
-            replace={str(name): bool(flag) for name, flag in replace.items()},
+            replace={str(name): flag for name, flag in replace.items()},
         )
 
         # Parse search
