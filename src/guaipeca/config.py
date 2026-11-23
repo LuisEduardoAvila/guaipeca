@@ -5,6 +5,7 @@ Loads and validates YAML config defining corpora, embedding, chunking, and serve
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field
@@ -168,6 +169,13 @@ class UploadConfig:
     # refuses it. Re-uploading a file the server uploaded is always allowed.
     replace: dict[str, bool] = field(default_factory=dict)
 
+    def __post_init__(self):
+        # Normalize extensions to have a leading dot, mirroring CorpusConfig.
+        self.allowed_extensions = [
+            ext if ext.startswith(".") else f".{ext}"
+            for ext in self.allowed_extensions
+        ]
+
 
 @dataclass
 class ServerConfig:
@@ -193,6 +201,28 @@ class ServerConfig:
     allowed_origins: list[str] | None = None
 
 
+def _build(cls, data: dict | None, *, section: str, **explicit):
+    """Build a config dataclass from a YAML mapping.
+
+    Keys that match dataclass fields are passed through; keys the YAML omits
+    take the dataclass defaults, so the field declaration is the single
+    source of truth for every default. Keys that match no field warn (naming
+    the key and the section) instead of being dropped silently. Values in
+    ``explicit`` win over the YAML and cover required fields and
+    pre-validated values.
+    """
+    fields = {f.name for f in dataclasses.fields(cls)}
+    data = data or {}
+    for key in data:
+        if key not in fields:
+            logger.warning(
+                "Unknown key %r in config section %r; ignoring it.", key, section
+            )
+    kwargs = {k: v for k, v in data.items() if k in fields}
+    kwargs.update(explicit)
+    return cls(**kwargs)
+
+
 @dataclass
 class GuaipecaConfig:
     """Top-level Guaipeca configuration."""
@@ -215,65 +245,46 @@ class GuaipecaConfig:
         if not data:
             raise ValueError(f"Empty config file: {path}")
 
+        # Top-level keys that match no section are a typo or a key for another
+        # version; warn so they are not dropped silently.
+        known_sections = {"corpora", "embedding", "chunking", "indexing",
+                          "server", "upload", "search"}
+        for key in data:
+            if key not in known_sections:
+                logger.warning(
+                    "Unknown top-level config key %r; ignoring it.", key
+                )
+
         # Parse corpora
         corpora = []
         for c in data.get("corpora", []):
-            corpora.append(CorpusConfig(
+            corpora.append(_build(
+                CorpusConfig,
+                c,
+                section=f"corpora[{c.get('name')!r}]",
                 name=c["name"],
                 path=c["path"],
-                topic=c.get("topic", ""),
-                weight=c.get("weight", 1.0),
-                extensions=c.get("extensions", [".md", ".txt"]),
-                max_distance=c.get("max_distance"),
             ))
 
         # Parse embedding
-        emb = data.get("embedding", {})
-        embedding = EmbeddingConfig(
-            model=emb.get("model", "all-MiniLM-L6-v2"),
-            dimensions=emb.get("dimensions", 384),
-            cache_dir=emb.get("cache_dir", "~/.guaipeca/models"),
-            preprocess=emb.get("preprocess", True),
-            cache_ttl_seconds=emb.get("cache_ttl_seconds", 3600),
-            cache_max_entries=emb.get("cache_max_entries", 10000),
-        )
+        embedding = _build(EmbeddingConfig, data.get("embedding"), section="embedding")
 
         # Parse chunking
-        chk = data.get("chunking", {})
-        chunking = ChunkingConfig(
-            max_size=chk.get("max_size", 2000),
-            overlap=chk.get("overlap", 200),
-            table_aware=chk.get("table_aware", True),
-            split_on_headings=chk.get("split_on_headings", True),
-        )
+        chunking = _build(ChunkingConfig, data.get("chunking"), section="chunking")
 
         # Parse indexing
-        idx = data.get("indexing", {})
-        indexing = IndexingConfig(
-            data_dir=idx.get("data_dir", "~/.guaipeca/data"),
-            incremental=idx.get("incremental", True),
-            max_file_size=idx.get("max_file_size", 52428800),
-            exclude_dirs=idx.get("exclude_dirs", ["node_modules", ".git", "venv", "__pycache__"]),
-        )
+        indexing = _build(IndexingConfig, data.get("indexing"), section="indexing")
 
         # Parse server
-        srv = data.get("server", {})
-        server = ServerConfig(
-            transport=srv.get("transport", "both"),
-            port=srv.get("port", 8090),
-            host=srv.get("host", "127.0.0.1"),
-            auth_token=srv.get("auth_token"),
-            max_body_size=srv.get("max_body_size", 73400320),
-            allowed_origins=srv.get("allowed_origins"),
-        )
+        server = _build(ServerConfig, data.get("server"), section="server")
         # Allow env var override for auth token (security best practice)
         env_token = os.environ.get("GUAIPECA_AUTH_TOKEN")
         if env_token:
             server.auth_token = env_token
 
         # Parse upload
-        upl = data.get("upload", {})
-        replace = upl.get("replace", {})
+        upl = data.get("upload") or {}
+        replace = upl.get("replace")
         if replace is None:
             replace = {}
         if not isinstance(replace, dict):
@@ -292,32 +303,14 @@ class GuaipecaConfig:
                     f"got: {flag!r}. Quote-free booleans only - the string "
                     f"\"false\" reads as true and would enable overwriting."
                 )
-        upload = UploadConfig(
-            allow=upl.get("allow", []),
-            max_file_size=upl.get("max_file_size", 52428800),
-            allowed_extensions=[
-                ext if ext.startswith(".") else f".{ext}"
-                for ext in upl.get("allowed_extensions",
-                                   [".md", ".txt", ".markdown", ".pdf", ".docx", ".doc",
-                                    ".pptx", ".ppt", ".xlsx", ".xls", ".html", ".htm", ".csv"])
-            ],
-            auto_index=upl.get("auto_index", True),
-            replace={str(name): flag for name, flag in replace.items()},
+        upload = _build(
+            UploadConfig,
+            {**upl, "replace": {str(name): flag for name, flag in replace.items()}},
+            section="upload",
         )
 
         # Parse search
-        srch = data.get("search", {})
-        search = SearchConfig(
-            hybrid=srch.get("hybrid", False),
-            bm25_weight=srch.get("bm25_weight", 1.0),
-            dense_weight=srch.get("dense_weight", 1.0),
-            rrf_k=srch.get("rrf_k", 60),
-            max_chars=srch.get("max_chars", 8000),
-            toc_rerank=srch.get("toc_rerank", False),
-            toc_rerank_weight=srch.get("toc_rerank_weight", 0.3),
-            fusion_alpha=srch.get("fusion_alpha", 0.3),
-            max_distance=srch.get("max_distance"),
-        )
+        search = _build(SearchConfig, data.get("search"), section="search")
 
         config = cls(
             corpora=corpora,
