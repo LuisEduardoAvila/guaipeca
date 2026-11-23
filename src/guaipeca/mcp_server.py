@@ -430,12 +430,28 @@ TOOLS = [
     },
 ]
 
+# Upper bound on a search's corpora list. Mirrors the maxItems in the search
+# tool schema; the SDK does not validate arguments against a schema, so the
+# handler has to keep the promise the schema makes.
+_MAX_CORPORA = 20
+
 
 # Path-like runs in an exception message: 3+ segments, or 2 segments ending
-# in a file extension. Shorter slash-prefixed tokens ("/mcp", "/api/v1") are
-# not filesystem paths and are left alone.
+# in a file extension. A two-segment token like "/mcp" is left alone. Note
+# the limit of this shape-based rule: a 3+ segment API path ("/api/v1/users")
+# is indistinguishable from a filesystem path and IS masked. That is the safe
+# direction for a sanitiser - over-masking a path costs a less specific error
+# message, under-masking costs a disclosure.
+#
+# The prefix class matters more than it looks. CPython's OSError renders its
+# filename with repr() - "[Errno 2] No such file or directory: '/path/a.md'" -
+# so the character before the slash is usually a QUOTE, and that is the most
+# common shape of the errors this sanitiser exists for. Quotes, brackets and
+# backticks are included for the same reason; a prefix-only-at-start-or-space
+# class silently leaked every quoted path (found in adversarial review, J1).
 _CLIENT_PATH_RE = re.compile(
-    r"(?:^|[\s(:=])/(?:[\w.-]+/){2,}[\w.-]+|(?:^|[\s(:=])/[\w.-]+/[\w-]+\.[A-Za-z0-9]+"
+    r"(?:^|[\s(:=,\[\]{}'\"`])/(?:[\w.-]+/){2,}[\w.-]+"
+    r"|(?:^|[\s(:=,\[\]{}'\"`])/[\w.-]+/[\w-]+\.[A-Za-z0-9]+"
 )
 
 
@@ -582,11 +598,15 @@ class GuaipecaMCPServer:
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
 
-        rejection = self._reject_unknown_arguments(tool_name, arguments)
-        if rejection is not None:
-            return rejection
-
+        # The reject call sits INSIDE the try: it does set(arguments or {}),
+        # which raises TypeError on a non-iterable, and it used to run before
+        # the guard existed so a client-supplied arguments=123 escaped the
+        # handler entirely (found in adversarial review, J2).
         try:
+            rejection = self._reject_unknown_arguments(tool_name, arguments)
+            if rejection is not None:
+                return rejection
+
             if tool_name == "search":
                 query = arguments.get("query", "")
                 top_k = arguments.get("top_k", 5)
@@ -615,6 +635,17 @@ class GuaipecaMCPServer:
                 ):
                     return self._error_result(
                         f"corpora must be a list of corpus names, got {corpora!r}"
+                    )
+                # The schema advertises maxItems 20, and search() does one
+                # index load and one dense+BM25 search PER ENTRY, accumulating
+                # every entry's results before sorting. A 10,000-entry request
+                # measured ~5s and ~1.2GB peak RSS, so an unenforced bound is a
+                # single-request resource exhaustion on an optionally
+                # unauthenticated surface (found in adversarial review, J3).
+                if corpora is not None and len(corpora) > _MAX_CORPORA:
+                    return self._error_result(
+                        f"corpora takes at most {_MAX_CORPORA} corpus names, "
+                        f"got {len(corpora)}"
                     )
                 hybrid = arguments.get("hybrid")
                 return_mode = arguments.get("return_mode", "chunks")

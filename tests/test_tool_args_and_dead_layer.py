@@ -186,3 +186,67 @@ def test_live_dispatch_still_works_after_deletion(server):
     result = _call(server, "search", query="alpha")
     assert "error" not in result or not result.get("isError")
     assert "search" in server._calls
+
+
+# --------------------------------------------------------------------------
+# J1/J2/J3 - the three P1s the adversarial review required before merge.
+# --------------------------------------------------------------------------
+
+def test_quoted_path_from_oserror_is_sanitised(server):
+    """J1: CPython renders OSError filenames with repr(), so the path is quoted."""
+    def boom(*a, **k):
+        raise FileNotFoundError(2, "No such file or directory", "/home/luis/corpus/secret.md")
+
+    server.searcher.search = boom
+    result = _call(server, "search", query="alpha")
+    text = json.dumps(result)
+
+    assert "/home/luis" not in text, f"quoted absolute path leaked: {text}"
+
+
+def test_quoted_path_shapes_are_all_sanitised():
+    from guaipeca.mcp_server import _client_error_message
+
+    for exc in (
+        FileNotFoundError(2, "No such file or directory", "/home/a/b/c.md"),
+        OSError(2, "No such file or directory: '/home/a/b/c.md'"),
+        RuntimeError('\"/home/a/b/c.md\" is not readable'),
+        RuntimeError("[/home/a/b/c.md] rejected"),
+    ):
+        out = _client_error_message(exc)
+        assert "/home" not in out, f"leaked from {exc!r}: {out!r}"
+
+
+def test_non_dict_arguments_do_not_escape_the_guard(server):
+    """J2: _reject_unknown_arguments ran before the try, so 123 escaped uncaught."""
+    for bad in (123, 1.5, ["a"], ("a",)):
+        try:
+            # Call the handler directly: _call() wraps its kwargs into a dict,
+            # which would make every one of these a valid dict and prove nothing.
+            result = server._handle_tool_call({"name": "search", "arguments": bad})
+        except Exception as exc:
+            raise AssertionError(
+                f"arguments={bad!r} raised {type(exc).__name__} out of the handler"
+            ) from exc
+        assert result.get("isError") or "error" in result, (
+            f"arguments={bad!r} should return an error result, got {result!r}"
+        )
+
+
+def test_oversized_corpora_list_is_rejected(server):
+    """J3: the schema advertises maxItems 20; the handler must enforce it."""
+    result = _call(server, "search", query="alpha", corpora=["docs"] * 10_000)
+
+    assert result.get("isError") or "error" in result, (
+        "10,000 corpora accepted; one request does 10,000 index searches"
+    )
+    assert "corpora" in json.dumps(result).lower()
+    assert "search" not in server._calls, "the searcher was reached with an oversized list"
+
+
+def test_corpora_at_the_limit_is_still_accepted(server):
+    """The bound is 20, not 0 - a legitimate request at the limit must work."""
+    result = _call(server, "search", query="alpha", corpora=["docs"] * 20)
+
+    assert not result.get("isError"), result
+    assert len(server._calls["search"]["corpora"]) == 20
