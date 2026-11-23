@@ -5,6 +5,8 @@ Notable changes to Guaipeca. Format loosely follows
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-11-23
+
 ### Changed
 
 - **Malformed or empty uploads are now refused instead of silently saved.**
