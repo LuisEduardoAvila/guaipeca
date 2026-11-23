@@ -14,10 +14,11 @@ Exposes twelve tools via Model Context Protocol:
 - uploads_status: show the upload-manifest state of a corpus
 - uploads_prune: remove stale upload-manifest entries (dry run by default)
 
-Transports:
-- stdio: newline-delimited JSON-RPC over stdin/stdout
-- http: MCP-compliant SSE-based transport (GET /sse + POST /messages)
-        + Streamable HTTP transport (POST /mcp, DELETE /mcp)
+Transports (both owned by the MCP SDK):
+- stdio: MCP over stdin/stdout via the SDK's stdio transport
+- http: the SDK's HTTP transport on uvicorn - Streamable HTTP (POST /mcp,
+        DELETE /mcp) + legacy SSE (GET /sse + POST /messages), plus the
+        non-MCP routes (/health, /tools, downloads, DELETE /documents)
 - both: stdio in a daemon thread + HTTP in main thread
 """
 
@@ -34,7 +35,6 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from . import __version__
 from .config import GuaipecaConfig
 from .converter import Converter
 from .embedding import EmbeddingService
@@ -107,26 +107,6 @@ def _origin_allowed(origin: str, allowed_origins: list[str] | None) -> bool:
     except ValueError:
         return host in ("localhost", "ip6-localhost", "ip6-loopback")
 
-
-# MCP protocol version (latest revision this server implements)
-#
-# NOTE: these constants describe the pre-migration hand-rolled negotiation.
-# They are NOT what the serving transports use any more - the SDK owns version
-# negotiation on both `/mcp` and the SSE transport, and it knows about
-# 2026-07-28 as well. They survive because `handle_request()` still reads them
-# and is still exercised by unit tests; `_process_jsonrpc()` (their only other
-# caller) is no longer reachable from any transport.
-#
-# Do not extend this set to fix a negotiation bug: the fix belongs in the SDK.
-MCP_VERSION = "2025-11-25"
-
-# Known protocol versions for negotiation (hand-rolled path only - see above)
-KNOWN_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
-
-# Minimum protocol version for the retired hand-rolled `/mcp` handler. The
-# enforcement it refers to no longer exists: the SDK's transport decides which
-# eras it serves. Kept only because `handle_request()` still checks it.
-MIN_STREAMABLE_VERSION = "2025-03-26"
 
 # Tool definitions
 TOOLS = [
@@ -451,26 +431,6 @@ TOOLS = [
 ]
 
 
-def _sanitize_error_message(exc: Exception) -> str:
-    """Sanitize error messages for client responses.
-
-    Removes internal file paths and library details that could
-    leak system information. Full exception is logged internally.
-    """
-    msg = str(exc)
-    # Replace absolute file paths with generic placeholder.
-    # Only match paths that look like real filesystem paths (3+ segments,
-    # or 2 segments with a file extension) to avoid sanitizing short
-    # slash-prefixed tokens like "/api/v1" in error messages.
-    import re
-    _path_re = re.compile(r"(?:^|\s)/(?:[\w.-]+/){2,}[\w.-]+|(?:^|\s)/[\w.-]+/[\w-]+\.[\w]+")
-    msg = _path_re.sub(" [path]", msg)
-    # Truncate overly long messages
-    if len(msg) > 300:
-        msg = msg[:300] + "..."
-    return msg
-
-
 # Path-like runs in an exception message: 3+ segments, or 2 segments ending
 # in a file extension. Shorter slash-prefixed tokens ("/mcp", "/api/v1") are
 # not filesystem paths and are left alone.
@@ -573,56 +533,6 @@ class GuaipecaMCPServer:
                 f"to verify. Error: {e}"
             )
             # Don't block startup — model will be loaded lazily on first use
-
-    def handle_request(self, method: str, params: dict) -> dict | None:
-        """
-        Handle a single MCP JSON-RPC request.
-
-        Returns the result dict, or None for notifications (which require no response).
-        """
-        params = params or {}
-
-        # Handle notifications — these are one-way messages from the client
-        # that should NOT receive a response (no error, no result)
-        if method.startswith("notifications/"):
-            logger.debug(f"Received notification: {method}")
-            return None
-
-        if method == "initialize":
-            # Protocol version negotiation: echo client's version if known,
-            # otherwise fall back to server's default. The R3 minimum-version
-            # check for /mcp is enforced in the HTTP handler, not here.
-            client_version = params.get("protocolVersion", MCP_VERSION)
-            if client_version in KNOWN_PROTOCOL_VERSIONS:
-                negotiated = client_version
-            else:
-                logger.info(
-                    "Unknown MCP protocol version %r requested; "
-                    "falling back to %s",
-                    client_version,
-                    MCP_VERSION,
-                )
-                negotiated = MCP_VERSION
-            return {
-                "protocolVersion": negotiated,
-                "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {
-                    "name": "guaipeca",
-                    "version": __version__,
-                },
-            }
-
-        elif method == "tools/list":
-            return {"tools": self._tools_with_corpus_enum()}
-
-        elif method == "tools/call":
-            return self._handle_tool_call(params)
-
-        elif method == "ping":
-            return {}
-
-        else:
-            return {"error": {"code": -32601, "message": f"Method not found: {method}"}}
 
     def _tools_with_corpus_enum(self) -> list[dict]:
         """Return TOOLS with the live corpus names advertised on corpus parameters.
@@ -933,51 +843,6 @@ class GuaipecaMCPServer:
             self.config, corpus_name, filename, do_index, self.searcher
         )
 
-    # ---- shared JSON-RPC processing ----
-
-    def _process_jsonrpc(self, raw_body: bytes) -> dict | None:
-        """Process a raw JSON-RPC request body and return a response dict.
-
-        Shared between stdio and HTTP POST handlers to avoid duplication.
-
-        Args:
-            raw_body: Raw bytes (or string) containing a JSON-RPC request.
-
-        Returns:
-            Response dict (jsonrpc, id, result/error) or None for notifications.
-            Returns an error response dict if parsing fails.
-        """
-        request = None
-        try:
-            if isinstance(raw_body, bytes):
-                request = json.loads(raw_body)
-            else:
-                request = json.loads(raw_body)
-            method = request.get("method", "")
-            params = request.get("params", {})
-            req_id = request.get("id")
-            result = self.handle_request(method, params)
-
-            # Notifications have no id and should not receive a response
-            if result is None or req_id is None:
-                return None
-
-            return {"jsonrpc": "2.0", "id": req_id, "result": result}
-        except json.JSONDecodeError:
-            logger.error("Invalid JSON in request body")
-            return {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32700, "message": "Parse error"},
-            }
-        except Exception as e:
-            logger.error(f"Error handling JSON-RPC request: {e}", exc_info=True)
-            req_id = request.get("id") if request is not None else None
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": -32603, "message": _sanitize_error_message(e)},
-            }
     def run_sdk_stdio(self):
         """Run the stdio transport through the official SDK (async stdio session).
 

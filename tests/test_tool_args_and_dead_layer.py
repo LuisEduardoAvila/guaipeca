@@ -11,13 +11,11 @@ These tests fail on unfixed code.
 from __future__ import annotations
 
 import importlib
-import inspect
 import json
 
 import pytest
 
 from guaipeca.mcp_server import GuaipecaMCPServer
-
 
 # --------------------------------------------------------------------------
 # #55.1 — arguments are validated, not passed through

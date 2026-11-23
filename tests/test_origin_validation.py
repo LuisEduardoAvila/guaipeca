@@ -46,7 +46,10 @@ import sys
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from guaipeca import __version__
-from guaipeca.mcp_server import MCP_VERSION, TOOLS, _origin_allowed
+from guaipeca.mcp_server import TOOLS, _origin_allowed
+
+# The SDK owns version negotiation now; this is the era its handshake uses.
+_PROTOCOL_VERSION = "2025-11-25"
 
 EVIL_ORIGIN = "http://evil.example.com"
 
@@ -65,7 +68,7 @@ class MockMCPServer:
             return None
         if method == "initialize":
             return {
-                "protocolVersion": MCP_VERSION,
+                "protocolVersion": _PROTOCOL_VERSION,
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": "guaipeca", "version": __version__},
             }
@@ -207,7 +210,7 @@ def _init_body() -> dict:
         "id": 1,
         "method": "initialize",
         "params": {
-            "protocolVersion": MCP_VERSION,
+            "protocolVersion": _PROTOCOL_VERSION,
             "capabilities": {},
             "clientInfo": {"name": "test-client", "version": "1.0"},
         },
