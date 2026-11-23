@@ -10,7 +10,7 @@ Production safety features:
 - Thread-safe access via read-write pattern (concurrent readers, exclusive writer)
 - File locking (fcntl.flock) to prevent concurrent indexing of the same corpus
 - Stable chunk IDs (SHA256-based) with lookup map for retrieval across rebuilds
-- Stale vector cleanup: filters out results from deleted files, rebuilds when deletion ratio is high
+- Stale chunk cleanup: deleted or changed files drop their old chunks and trigger an index rebuild; search also filters out results from deleted files
 - BM25 sparse keyword index alongside FAISS dense vector index
 """
 
@@ -35,9 +35,6 @@ from .converter import Converter
 from .embedding import EmbeddingService
 
 logger = logging.getLogger(__name__)
-
-# Deletion ratio threshold for triggering a full index rebuild
-STALE_REBUILD_THRESHOLD = 0.10
 
 
 def _scores_are_cosine(index) -> bool:
@@ -872,7 +869,9 @@ class CorpusIndex:
         """
         Rebuild the FAISS index from scratch, keeping only chunks from files in keep_files.
 
-        This is triggered when the stale vector ratio exceeds the threshold.
+        Triggered whenever a file was deleted or changed: the surviving chunk
+        texts are re-embedded and the FAISS index is rebuilt from them, so no
+        stale vector survives in the index.
         """
         import faiss
 
@@ -974,6 +973,12 @@ class CorpusIndex:
         # Keep track of which files still exist (for cleanup)
         current_files = set()
 
+        # Files whose content changed since the last run. A changed file is
+        # never in the "deleted" set (its hash entry is overwritten before
+        # that set is computed), so it is tracked separately and cleaned up
+        # the same way (issue #62).
+        changed_files = set()
+
         for file_path in files:
             current_files.add(file_path)
 
@@ -985,6 +990,15 @@ class CorpusIndex:
                     self._file_hashes.get(file_path) == file_hash:
                 files_skipped += 1
                 continue
+
+            # The file is being (re)indexed. If it was already indexed with a
+            # different hash, its old chunks are stale - record it BEFORE the
+            # hash entry is overwritten below so cleanup can drop them. Only a
+            # file that finishes this run counts as changed: a file whose
+            # conversion or embedding fails keeps its previous chunks, because
+            # losing a document to a transient error is worse than one stale
+            # chunk surviving until the next successful run (issue #62).
+            pending_change = file_path in self._file_hashes
 
             # Convert to markdown
             try:
@@ -1029,16 +1043,10 @@ class CorpusIndex:
 
             # Update hash (reuse cached hash from earlier)
             self._file_hashes[file_path] = file_hash
+            if pending_change:
+                changed_files.add(file_path)
             files_indexed += 1
             chunks_created += len(file_chunks)
-
-        # Add new embeddings to FAISS index
-        if new_embeddings:
-            import numpy as np
-
-            all_new = np.vstack(new_embeddings)
-            self._faiss_index.add(all_new)
-            self._chunks.extend(new_chunks)
 
         # Clean up deleted files
         deleted = set(self._file_hashes.keys()) - current_files
@@ -1047,26 +1055,27 @@ class CorpusIndex:
                 logger.info(f"File removed: {f}")
                 self._file_hashes.pop(f, None)
 
-            # Check if rebuild is needed (stale vector ratio exceeds threshold)
-            total_vectors = self._faiss_index.ntotal
-            if total_vectors > 0:
-                # Count how many chunks belong to deleted files
-                stale_count = sum(
-                    1 for c in self._chunks if c.source_path not in current_files
-                )
-                stale_ratio = stale_count / total_vectors if total_vectors > 0 else 0
+        if changed_files or deleted:
+            # A changed file's old chunks are stale in exactly the same way a
+            # deleted file's chunks are: the file still exists, so the
+            # read-time stale filter cannot catch them. Drop every chunk that
+            # belongs to a changed or deleted file (the new chunks for changed
+            # files have not been appended yet), append the new chunks, and
+            # rebuild the FAISS index from the surviving chunks. The rebuild
+            # is unconditional - a below-threshold duplicate is invisible to
+            # the user, so correctness wins over the re-embedding cost.
+            stale_files = changed_files | deleted
+            self._chunks = [c for c in self._chunks if c.source_path not in stale_files]
+            self._chunks.extend(new_chunks)
+            self._rebuild_index(current_files)
+        else:
+            # Add new embeddings to FAISS index
+            if new_embeddings:
+                import numpy as np
 
-                if stale_ratio > STALE_REBUILD_THRESHOLD:
-                    logger.info(
-                        f"Stale vector ratio {stale_ratio:.1%} exceeds threshold "
-                        f"{STALE_REBUILD_THRESHOLD:.0%}, rebuilding index"
-                    )
-                    self._rebuild_index(current_files)
-                else:
-                    logger.debug(
-                        f"Stale vector ratio {stale_ratio:.1%} below threshold, "
-                        f"will filter in search"
-                    )
+                all_new = np.vstack(new_embeddings)
+                self._faiss_index.add(all_new)
+                self._chunks.extend(new_chunks)
 
         # Rebuild stable ID map (positions may have changed)
         self._rebuild_stable_id_map()

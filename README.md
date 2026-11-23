@@ -28,7 +28,7 @@ Proven on a Raspberry Pi 5 (8GB RAM, ARM64) alongside other services. If it runs
 - **Any document format** — pymupdf (PDFs with font-based heading detection + line-wrap stitching) + markitdown (DOCX, PPTX, XLSX, HTML → markdown)
 - **Structure-aware chunking** — splits on headings, treats tables as atomic units, zero LLM calls
 - **Local embeddings** — fastembed (ONNX Runtime) on CPU, no GPU or API keys needed
-- **Incremental indexing** — SHA256 file hashing, only re-indexes changed files
+- **Incremental indexing** — SHA256 file hashing, only re-indexes changed files; a changed or deleted file triggers a rebuild of the index so its old chunks never survive
 - **FAISS backup + recovery** — automatic `.fai.bak` backup before writes, fallback chain on load (primary → backup → fresh)
 - **Embedding cache (LRU + TTL)** — 10K-entry LRU cache with 1hr TTL, memory-pressure aware eviction via psutil
 - **Content preprocessing** — heading + first 500 chars sent to embedder for better semantic signal; full text stored in metadata

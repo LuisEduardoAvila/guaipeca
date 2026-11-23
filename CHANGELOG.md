@@ -50,6 +50,18 @@ Notable changes to Guaipeca. Format loosely follows
 
 ### Fixed
 
+- **A modified file no longer leaves stale chunks in the index.** Incremental
+  reindexing overwrote a file's stored hash before computing the set of
+  deleted files, so a file whose content changed was never cleaned up: its old
+  chunks stayed in the index and in FAISS while the new chunks were appended on
+  top. The index grew on every edit, superseded content stayed retrievable,
+  and one chunk ID could sit at more than one FAISS position. A changed file is
+  now treated like a deleted file for cleanup, and any deletion or change
+  triggers a full rebuild of the FAISS index from the surviving chunks, so
+  reindexing after an edit returns only the current content (#62).
+- **A corpus with chunks but zero FAISS vectors is no longer reported as
+  "No indexed content found".** The search-time guard counted only the FAISS
+  vector count; a populated BM25 index now also counts as indexed content.
 - **`config/guaipeca.yaml` and README no longer describe `0.0.0.0` as a plain
   "network access" toggle.** Both now state that it requires auth and that the
   server refuses to start otherwise.

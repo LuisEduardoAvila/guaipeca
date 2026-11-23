@@ -209,16 +209,16 @@ Location: `index.py` `_acquire_lock()` / `_release_lock()` (lines 163–188).
 
 Uses `fcntl.flock(LOCK_EX | LOCK_NB)` on a per-corpus lock file (`corpus.lock`). This prevents concurrent indexing of the same corpus by different processes. The lock is non-blocking — if another process holds it, indexing returns an error immediately rather than waiting.
 
-### Stale vector cleanup
+### Stale chunk cleanup
 
-When files are deleted from a corpus, their vectors become "stale" (orphaned in the FAISS index).
+When a file is deleted from a corpus, or its content changes, its old chunks become "stale" (orphaned in the FAISS index). A changed file is never in the "deleted" set — its hash entry is overwritten before that set is computed — so changed files are tracked separately during indexing and cleaned up the same way.
 
+- **Index-time rebuild** — During an incremental index run, every chunk belonging to a deleted or changed file is dropped from the chunk list, and the FAISS index is rebuilt from the surviving chunks (re-embedded via `_rebuild_index()`). This happens unconditionally whenever any file was deleted or changed, so no stale vector survives in the index.
 - **Search-time filtering** — Search results check `os.path.exists(chunk.source_path)` and skip chunks whose source file no longer exists (lines 415–431).
-- **Rebuild threshold** — When the stale vector ratio exceeds 10% (`STALE_REBUILD_THRESHOLD = 0.10`), the entire index is rebuilt from scratch, keeping only chunks from existing files (`_rebuild_index()`, lines 222–250).
 
 ### Delete and reindex
 
-The `delete` MCP tool and `DELETE /documents` HTTP endpoint remove files from upload-enabled corpora (those listed in `upload.allow`). After deletion, an incremental reindex is triggered by default (same as upload). The incremental reindex detects the removed file via `_scan_files()` → `deleted = set(self._file_hashes.keys()) - current_files`, removes its hash, and relies on the stale vector cleanup mechanisms above (search-time filtering + rebuild threshold). A `force=True` reindex is not needed for correctness — users can request one separately via the `index` tool if desired.
+The `delete` MCP tool and `DELETE /documents` HTTP endpoint remove files from upload-enabled corpora (those listed in `upload.allow`). After deletion, an incremental reindex is triggered by default (same as upload). The incremental reindex detects the removed file via `_scan_files()` → `deleted = set(self._file_hashes.keys()) - current_files`, removes its hash, and relies on the stale chunk cleanup above (index-time rebuild + search-time filtering). A `force=True` reindex is not needed for correctness — users can request one separately via the `index` tool if desired.
 
 ## Concurrency Model
 
