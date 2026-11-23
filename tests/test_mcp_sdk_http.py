@@ -148,7 +148,7 @@ def test_legacy_initialize_then_tools_list(client):
     assert body["jsonrpc"] == "2.0"
     assert body["id"] == 2
     tools = body["result"]["tools"]
-    assert len(tools) == 10
+    assert len(tools) == 12
     assert {tool["name"] for tool in tools} == {tool["name"] for tool in TOOLS}
     # The SDK serialises inputSchema under its wire alias, not input_schema.
     assert all("inputSchema" in tool for tool in tools)
@@ -206,7 +206,7 @@ def test_modern_stateless_tools_list(client):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["id"] == 10
-    assert len(body["result"]["tools"]) == 10
+    assert len(body["result"]["tools"]) == 12
     # Stateless: no session is minted for the modern era.
     assert "mcp-session-id" not in response.headers
 
@@ -394,7 +394,7 @@ def test_wrong_token_is_401(auth_client):
 def test_tools_endpoint_matches_tools_list(client):
     response = client.get("/tools")
     assert response.status_code == 200
-    assert len(response.json()["tools"]) == 10
+    assert len(response.json()["tools"]) == 12
 
 
 def test_delete_documents_delegates_to_handler(client):

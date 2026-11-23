@@ -7,6 +7,23 @@ Notable changes to Guaipeca. Format loosely follows
 
 ### Changed
 
+- **Overwriting and deleting files the server did not upload is now refused.**
+  The `upload` and `delete` tools (and the `upload`/`delete`/
+  `DELETE /documents` endpoints) track every server-uploaded file in a
+  per-corpus manifest (`uploaded.json` in the corpus directory). Uploading
+  over an existing filename is now refused unless the server uploaded that
+  file itself or the corpus sets `upload.replace: {<corpus>: true}` in the
+  config; deleting a file is refused unless it is tracked in the manifest,
+  has an allowed extension, and is not a reserved name (`uploaded.json`,
+  `.guaipeca*`, `*.tmp`). Deleting a tracked file whose content was edited
+  outside the API is refused as drift. The delete-then-upload cycle still
+  works: deleting removes the manifest entry, freeing the name for the
+  replacement. Two new commands/tools inspect and repair the manifest:
+  `guaipeca uploads-status --corpus C [--json]` (MCP `uploads_status`)
+  reports tracked, drifted, orphan and missing files, and
+  `guaipeca uploads-prune --corpus C [--apply] [--json]` (MCP
+  `uploads_prune`) removes stale manifest entries (dry run without
+  `--apply`; never deletes files).
 - **A public bind without auth is refused, not warned about.** Binding
   `server.host` to anything other than loopback (`0.0.0.0`, `::`, a LAN address,
   a hostname) while no `server.auth_token` is configured now raises at startup

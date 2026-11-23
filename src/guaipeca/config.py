@@ -163,6 +163,10 @@ class UploadConfig:
                                  ".pptx", ".ppt", ".xlsx", ".xls", ".html", ".htm", ".csv"]
     )
     auto_index: bool = True  # index the corpus after uploading a file
+    # Per-corpus replacement permission: corpus name -> bool. True allows
+    # overwriting a file the server did not upload itself; absent/false
+    # refuses it. Re-uploading a file the server uploaded is always allowed.
+    replace: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass
@@ -269,6 +273,14 @@ class GuaipecaConfig:
 
         # Parse upload
         upl = data.get("upload", {})
+        replace = upl.get("replace", {})
+        if replace is None:
+            replace = {}
+        if not isinstance(replace, dict):
+            raise ValueError(
+                f"upload.replace must be a mapping of corpus name to boolean, "
+                f"got: {replace!r}"
+            )
         upload = UploadConfig(
             allow=upl.get("allow", []),
             max_file_size=upl.get("max_file_size", 52428800),
@@ -279,6 +291,7 @@ class GuaipecaConfig:
                                     ".pptx", ".ppt", ".xlsx", ".xls", ".html", ".htm", ".csv"])
             ],
             auto_index=upl.get("auto_index", True),
+            replace={str(name): bool(flag) for name, flag in replace.items()},
         )
 
         # Parse search

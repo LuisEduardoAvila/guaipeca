@@ -110,13 +110,15 @@ class TestUploadUsesReplace:
         )
 
         # Write twice: the second write targets an existing filename, which is
-        # exactly the case that raised WinError 183 under os.rename.
+        # exactly the case that raised WinError 183 under os.rename. Each
+        # upload writes two files atomically (the document and the upload
+        # manifest), so two os.replace calls per upload.
         first = uploads.save_upload(cfg, "test", "note.md", b"# hello\n", do_index=False)
         second = uploads.save_upload(cfg, "test", "note.md", b"# hello again\n", do_index=False)
 
         assert "error" not in first, first
         assert "error" not in second, second
-        assert calls == ["replace", "replace"]
+        assert calls == ["replace", "replace", "replace", "replace"]
         assert (corpus_dir / "note.md").read_bytes() == b"# hello again\n"
 
 

@@ -230,7 +230,7 @@ def stdio_child(stdio_config: Path):
 
 
 def test_stdio_initialize_then_tools_list(stdio_child: _StdioChild):
-    """A real stdio client can initialize and list all ten tools."""
+    """A real stdio client can initialize and list all twelve tools."""
     result = _initialize(stdio_child)
     assert result["serverInfo"]["name"] == "guaipeca"
     assert result.get("protocolVersion"), f"no protocolVersion in initialize result: {result}"
@@ -248,7 +248,7 @@ def test_stdio_initialize_then_tools_list(stdio_child: _StdioChild):
         f"tool set differs from the registry: "
         f"missing={sorted(EXPECTED_TOOLS - names)}, unexpected={sorted(names - EXPECTED_TOOLS)}"
     )
-    assert len(names) == 10
+    assert len(names) == 12
 
 
 def test_stdio_exits_cleanly_on_eof(stdio_child: _StdioChild):

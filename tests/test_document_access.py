@@ -593,6 +593,6 @@ class TestMCPToolDefinitions:
         assert "corpus" not in required
 
     def test_tool_count(self):
-        """Should now have 8 tools (6 original + 2 new)."""
+        """Should now have 12 tools (10 original + uploads_status/uploads_prune)."""
         from guaipeca.mcp_server import TOOLS
-        assert len(TOOLS) == 10, f"Expected 10 tools, got {len(TOOLS)}: {[t['name'] for t in TOOLS]}"
+        assert len(TOOLS) == 12, f"Expected 12 tools, got {len(TOOLS)}: {[t['name'] for t in TOOLS]}"
