@@ -752,10 +752,8 @@ class GuaipecaMCPServer:
             else:
                 return self._error_result(f"Unknown tool: {tool_name}")
         except Exception as exc:
-            # The searcher and the upload adapters raise freely (OSError,
-            # KeyError, model errors). A raw exception would leak filesystem
-            # paths and internals to the client, so log the full detail here
-            # and return a sanitised message instead.
+            # The searcher and the upload adapters raise freely; a raw exception
+            # would leak filesystem paths and internals to the client.
             logger.error(
                 "Error handling tool call %r: %s", tool_name, exc, exc_info=True
             )
