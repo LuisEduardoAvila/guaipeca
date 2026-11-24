@@ -36,13 +36,17 @@ def _server(searcher=None):
 class _RecordingSearcher:
     """Records the corpora it was asked to search; never loads a model."""
 
-    def __init__(self, result=None):
+    def __init__(self, result=None, index_result=None):
         self.calls = []
         self._result = result or {"results": [], "total": 0, "query": "q", "return_mode": "chunks"}
+        self._index_result = index_result or {"indexed": 0, "corpus": "test"}
 
     def search(self, query, **kwargs):
         self.calls.append({"query": query, **kwargs})
         return self._result
+
+    def index_corpus(self, corpus_name, force=False):
+        return self._index_result
 
 
 class TestUnknownArgumentsRejected:
@@ -144,3 +148,37 @@ class TestSearchErrorsAreMCPErrors:
 
         assert searcher.calls[0]["corpora"] == ["sam"]
         assert searcher.calls[0]["top_k"] == 2
+
+
+class TestIndexErrorsAreMCPErrors:
+    def test_index_corpus_not_found_sets_is_error(self):
+        """A failed index must not look like a valid empty result.
+
+        Regression guard for issue #56: the index branch previously
+        returned _result_to_mcp(result) without checking for error,
+        so isError was false even when the corpus didn't exist.
+        """
+        searcher = _RecordingSearcher(
+            index_result={"error": "corpus not found: nope"}
+        )
+        server = _server(searcher)
+
+        result = server._handle_tool_call(
+            {"name": "index", "arguments": {"corpus": "nope"}}
+        )
+
+        assert result.get("isError") is True
+        assert "corpus not found: nope" in result["content"][0]["text"]
+
+    def test_index_success_not_flagged(self):
+        """A successful index must not set isError."""
+        searcher = _RecordingSearcher(
+            index_result={"indexed": 10, "corpus": "test"}
+        )
+        server = _server(searcher)
+
+        result = server._handle_tool_call(
+            {"name": "index", "arguments": {"corpus": "test"}}
+        )
+
+        assert not result.get("isError")

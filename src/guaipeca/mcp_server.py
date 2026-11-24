@@ -699,6 +699,8 @@ class GuaipecaMCPServer:
                 corpus = arguments.get("corpus", "all")
                 force = arguments.get("force", False)
                 result = self.searcher.index_corpus(corpus_name=corpus, force=force)
+                if result.get("error"):
+                    return self._error_result(result["error"])
                 return self._result_to_mcp(result)
 
             elif tool_name == "status":
