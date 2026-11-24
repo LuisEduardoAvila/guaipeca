@@ -273,6 +273,20 @@ Ten tools are exposed:
 - Origin validation (`_origin_allowed()`): requests with an unrecognised `Origin` get `403` before auth runs. Default policy accepts loopback origins only; `server.allowed_origins` (list of exact strings) replaces that default. A missing `Origin` is always allowed (non-browser clients). Validated origins are echoed in `Access-Control-Allow-Origin`.
 - Error messages are sanitized: absolute file paths replaced with `[path]`, messages truncated to 300 characters
 
+### Network exposure
+
+`_check_bind_exposure()` refuses to start when `server.host` is not loopback and no
+`auth_token` is configured. The check is deliberately address-class-blind: it asks
+"is this loopback?" and treats everything else the same, including an overlay-network
+address such as a Tailscale `100.64.0.0/10` address. The reasoning — and the rule that
+the check should stay unchanged — is in
+[`network-access-design.md`](network-access-design.md).
+
+Summary: reach the service over an encrypted overlay (Tailscale/WireGuard) rather than
+a plaintext LAN bind, bind to the specific overlay address rather than `0.0.0.0`, and
+keep the token required even on the tailnet, because an overlay authenticates devices,
+not service users.
+
 ### Error sanitization
 
 Location: `mcp_server.py` `_sanitize_error_message()` (lines 24–34).

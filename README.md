@@ -491,7 +491,9 @@ sudo systemctl disable guaipeca    # stop starting on boot
   systemd, where the unit has no stdin
 - Port 8090 is bound to `127.0.0.1` by default (config `server.host`). Setting `0.0.0.0`
   exposes every route to the network and **requires `server.auth_token`** — the server
-  refuses to start otherwise
+  refuses to start otherwise. To serve other machines, prefer binding to a
+  Tailscale/WireGuard address rather than `0.0.0.0`; see
+  [docs/network-access-design.md](docs/network-access-design.md)
 - Resource limits (`MemoryMax`, `CPUQuota`) prevent Guaipeca from starving other services on shared or low-resource hosts
 - The embedding model loads at startup (~1s with fastembed/ONNX). First search/index may take slightly longer if the model needs to download
 - Config changes require a restart: `sudo systemctl restart guaipeca`
@@ -624,6 +626,24 @@ Push to `main` triggers a GitHub Actions workflow that:
 
 - **Default binding:** The HTTP server binds to `127.0.0.1` (localhost) by default.
   Change `host: 0.0.0.0` in config only if you need network access.
+- **Reaching it from another machine:** use an encrypted overlay network (Tailscale
+  or any WireGuard/SSH tunnel) rather than binding to a plaintext LAN address.
+  Bind to the *specific* overlay address, not `0.0.0.0` — `0.0.0.0` also listens on
+  every other interface, including your LAN and any docker bridges:
+  ```yaml
+  server:
+    host: 100.x.y.z          # this host's tailnet address, not 0.0.0.0
+    port: 8090
+    allowed_origins:
+      - http://hspi.tailnet-name.ts.net:8090   # if a browser UI uses it
+  ```
+  An overlay bind still **requires `auth_token`**: the network authenticates
+  *devices*, not *users of the service*, and a compromised device on your tailnet is
+  still an authenticated device. Transport is already encrypted by WireGuard, so
+  application-level TLS adds nothing there; it is only required if you ever serve a
+  plain LAN address or a public hostname. See
+  [docs/network-access-design.md](docs/network-access-design.md) for the trust-class
+  table and the tailnet ACL recipe.
 - **Authentication:** Set `auth_token` in the server config to require
   `Authorization: Bearer <token>` headers on HTTP requests. When auth is enabled,
   CORS is restricted (no wildcard origin).
