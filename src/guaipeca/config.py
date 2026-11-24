@@ -87,12 +87,15 @@ class CorpusConfig:
     def __post_init__(self):
         # Expand ~ in path
         self.path = os.path.expanduser(self.path)
-        # Normalize extensions to lowercase with leading dot.
+        # Normalize extensions to lowercase with leading dot; coerce None.
         # Consumers compare Path(filename).suffix.lower().
-        self.extensions = [
-            (ext if ext.startswith(".") else f".{ext}").lower()
-            for ext in self.extensions
-        ]
+        if self.extensions is None:
+            self.extensions = [".md", ".txt"]
+        else:
+            self.extensions = [
+                (ext if ext.startswith(".") else f".{ext}").lower()
+                for ext in self.extensions
+            ]
 
 
 @dataclass
@@ -286,6 +289,21 @@ class GuaipecaConfig:
 
         # Parse upload
         upl = data.get("upload") or {}
+        # Validate upload.allow: must be a list of strings; reject strings/null.
+        if "allow" in upl and not isinstance(upl["allow"], list):
+            raise ValueError(
+                f"upload.allow must be a list of strings or null, got: "
+                f"{upl['allow']!r}"
+            )
+        if upl.get("max_file_size") is not None and (
+            not isinstance(upl["max_file_size"], int)
+            or isinstance(upl["max_file_size"], bool)
+            or upl["max_file_size"] < 1
+        ):
+            raise ValueError(
+                f"upload.max_file_size must be a positive integer, got: "
+                f"{upl['max_file_size']!r}"
+            )
         replace = upl.get("replace")
         if replace is None:
             replace = {}
@@ -336,11 +354,16 @@ class GuaipecaConfig:
         Logs warnings for type mismatches and coerces where possible.
         Raises ValueError for unfixable type errors.
         """
-        # Corpus weights must be numeric
+        # Corpus weights must be numeric and non-negative
         for c in self.corpora:
-            if not isinstance(c.weight, (int, float)):
-                logger.warning(f"Corpus '{c.name}' weight is not numeric ({type(c.weight).__name__}), defaulting to 1.0")
-                c.weight = 1.0
+            if isinstance(c.weight, bool) or not isinstance(c.weight, (int, float)):
+                raise ValueError(
+                    f"Corpus '{c.name}' weight must be a number, got: {type(c.weight).__name__}"
+                )
+            if c.weight < 0:
+                raise ValueError(
+                    f"Corpus '{c.name}' weight must be >= 0, got: {c.weight}"
+                )
             if c.max_distance is not None and (
                 isinstance(c.max_distance, bool)
                 or not isinstance(c.max_distance, (int, float))
@@ -352,13 +375,13 @@ class GuaipecaConfig:
                 )
 
         # Chunking config
-        if not isinstance(self.chunking.max_size, int) or self.chunking.max_size < 1:
+        if not isinstance(self.chunking.max_size, int) or isinstance(self.chunking.max_size, bool) or self.chunking.max_size < 1:
             raise ValueError(f"chunking.max_size must be a positive integer, got: {self.chunking.max_size!r}")
-        if not isinstance(self.chunking.overlap, int) or self.chunking.overlap < 0:
+        if not isinstance(self.chunking.overlap, int) or isinstance(self.chunking.overlap, bool) or self.chunking.overlap < 0:
             raise ValueError(f"chunking.overlap must be a non-negative integer, got: {self.chunking.overlap!r}")
 
         # Indexing config
-        if not isinstance(self.indexing.max_file_size, int) or self.indexing.max_file_size < 1:
+        if not isinstance(self.indexing.max_file_size, int) or isinstance(self.indexing.max_file_size, bool) or self.indexing.max_file_size < 1:
             raise ValueError(f"indexing.max_file_size must be a positive integer, got: {self.indexing.max_file_size!r}")
 
         # Upload config
@@ -380,7 +403,7 @@ class GuaipecaConfig:
             raise ValueError(f"embedding.dimensions must be a positive integer, got: {self.embedding.dimensions!r}")
 
         # Server config
-        if not isinstance(self.server.port, int) or self.server.port < 1 or self.server.port > 65535:
+        if not isinstance(self.server.port, int) or isinstance(self.server.port, bool) or self.server.port < 1 or self.server.port > 65535:
             raise ValueError(f"server.port must be an integer 1-65535, got: {self.server.port!r}")
         if self.server.auth_token is not None and not isinstance(self.server.auth_token, str):
             raise ValueError(f"server.auth_token must be a string or null, got: {type(self.server.auth_token).__name__}")
@@ -426,8 +449,21 @@ class GuaipecaConfig:
                     "appear in an HTTP header value; such a token could never be "
                     "presented. Use printable ASCII."
                 )
-        if not isinstance(self.server.max_body_size, int) or self.server.max_body_size < 1:
+        if not isinstance(self.server.max_body_size, int) or isinstance(self.server.max_body_size, bool) or self.server.max_body_size < 1:
             raise ValueError(f"server.max_body_size must be a positive integer, got: {self.server.max_body_size!r}")
+        _MAX_BODY_HINT = 1_073_741_824  # 1 GB
+        if self.server.max_body_size > _MAX_BODY_HINT:
+            raise ValueError(
+                f"server.max_body_size ({self.server.max_body_size}) exceeds "
+                f"the recommended maximum of {_MAX_BODY_HINT} bytes (1 GB). "
+                f"This is unsafe on hosts with limited memory."
+            )
+        if self.server.max_body_size > 100 * 1024 * 1024:  # > 100 MB
+            logger.warning(
+                "server.max_body_size is %d bytes (%.1f MB); consider keeping it "
+                "below 100 MB to avoid memory pressure on resource-constrained hosts",
+                self.server.max_body_size, self.server.max_body_size / (1024 * 1024)
+            )
         if self.server.transport == "sse":
             raise ValueError(
                 "server.transport is 'sse', but the legacy SSE transport was removed in the "
@@ -451,13 +487,24 @@ class GuaipecaConfig:
         # Search config
         if not isinstance(self.search.hybrid, bool):
             raise ValueError(f"search.hybrid must be a boolean, got: {type(self.search.hybrid).__name__}")
-        if not isinstance(self.search.bm25_weight, (int, float)) or self.search.bm25_weight < 0:
+        if not isinstance(self.search.toc_rerank, bool):
+            raise ValueError(f"search.toc_rerank must be a boolean, got: {type(self.search.toc_rerank).__name__}")
+        if not isinstance(self.search.toc_rerank_weight, (int, float)) or isinstance(self.search.toc_rerank_weight, bool) or self.search.toc_rerank_weight < 0:
+            raise ValueError(
+                f"search.toc_rerank_weight must be a non-negative number, got: {self.search.toc_rerank_weight!r}"
+            )
+        if not isinstance(self.search.fusion_alpha, (int, float)) or isinstance(self.search.fusion_alpha, bool) or not (0.0 <= self.search.fusion_alpha <= 1.0):
+            raise ValueError(
+                f"search.fusion_alpha must be a number in [0, 1], "
+                f"got: {self.search.fusion_alpha!r}"
+            )
+        if not isinstance(self.search.bm25_weight, (int, float)) or isinstance(self.search.bm25_weight, bool) or self.search.bm25_weight < 0:
             raise ValueError(f"search.bm25_weight must be a non-negative number, got: {self.search.bm25_weight!r}")
-        if not isinstance(self.search.dense_weight, (int, float)) or self.search.dense_weight < 0:
+        if not isinstance(self.search.dense_weight, (int, float)) or isinstance(self.search.dense_weight, bool) or self.search.dense_weight < 0:
             raise ValueError(f"search.dense_weight must be a non-negative number, got: {self.search.dense_weight!r}")
-        if not isinstance(self.search.rrf_k, int) or self.search.rrf_k < 1:
+        if not isinstance(self.search.rrf_k, int) or isinstance(self.search.rrf_k, bool) or self.search.rrf_k < 1:
             raise ValueError(f"search.rrf_k must be a positive integer, got: {self.search.rrf_k!r}")
-        if not isinstance(self.search.max_chars, int) or self.search.max_chars < 1:
+        if not isinstance(self.search.max_chars, int) or isinstance(self.search.max_chars, bool) or self.search.max_chars < 1:
             raise ValueError(f"search.max_chars must be a positive integer, got: {self.search.max_chars!r}")
         if self.search.max_distance is not None and (
             isinstance(self.search.max_distance, bool)
