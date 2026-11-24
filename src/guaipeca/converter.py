@@ -366,24 +366,19 @@ class Converter:
                             if (pending_label is not None
                                     and max_size == pending_label[2]):
                                 # Merge: label + title into one heading.
+                                # Seed the accumulator with BOTH parts and let
+                                # _flush_heading emit it once through
+                                # _emit_heading, so last_marker, hyphen joining
+                                # and duplicate suppression all apply. Emitting
+                                # inline here as well double-emitted the title
+                                # (## 30 Chapter + ## Chapter).
                                 label_text = pending_label[1]
-                                label_level = pending_label[0]
-                                merged_text = f"{label_text} {line_text}"
-                                merged_level = size_to_level.get(
-                                    pending_label[2],
-                                    label_level,
-                                )
-                                output_lines.append(
-                                    f"{'#' * merged_level} {merged_text}"
-                                )
-                                output_lines.append("")
-                                emitted_headings.append(
-                                    (merged_level, merged_text, pending_label[2])
-                                )
+                                label_size = pending_label[2]
                                 pending_label = None
-                                heading_parts = [line_text]
+                                heading_parts = [label_text, line_text]
                                 heading_size = max_size
-                                heading_level_size = max_size
+                                # The label's size carries the chapter level.
+                                heading_level_size = label_size
                                 heading_is_label = False
                             else:
                                 # Start a new heading.
