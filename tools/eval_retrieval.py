@@ -7,10 +7,10 @@ hybrid+toc_rerank).
 
 Why this exists
 ---------------
-Guaipeca's `search.hybrid` and `search.toc_rerank` are OFF by default for
-backward compatibility. Before flipping those defaults we need evidence, not
-priors: does hybrid actually improve retrieval on THIS user's corpora, or does
-it trade keyword precision for recall loss?
+Guaipeca's `search.hybrid` defaults to `True` (BM25+FAISS fusion) and
+`search.toc_rerank` defaults to `False`. This harness lets operators
+measure whether the defaults match THEIR corpora: does hybrid actually
+improve retrieval, or does toc_rerank help enough to warrant enabling it?
 
 Design
 ------
