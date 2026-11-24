@@ -1,6 +1,6 @@
 # Network Access Design
 
-Status: **proposal** — resolves [#69](https://github.com/LuisEduardoAvila/guaipeca/issues/69). Not yet implemented.
+Status: **adopted** — addresses [#69](https://github.com/LuisEduardoAvila/guaipeca/issues/69). The design decision is settled; the operator-side container step is tracked separately.
 
 ## The question
 
@@ -24,6 +24,15 @@ This satisfies the threat #69 names without adding certificate management to a s
 
 TLS in the application means: key material on disk, a renewal path, a hostname that matches the certificate, and a new failure mode where an expired cert takes the service down. On a Pi-class single-operator host, that is a permanent operational tax to solve a confidentiality problem that WireGuard already solves one layer down. If guaipeca is ever required to serve a public hostname, TLS becomes necessary — but that is a different deployment, and it should be a different decision rather than a default.
 
+**TLS is not a no-op, though, and the earlier framing of "adds nothing" was too strong.** Where WireGuard is in use, TLS still buys four things that have nothing to do with wire confidentiality:
+
+1. **The client can verify the server's identity by name.** `tailscale cert` issues a publicly trusted cert for the `*.ts.net` name. WireGuard authenticates the *channel endpoints*; it does not tell a browser that the HTTP service behind those endpoints is the one it expected.
+2. **It defeats an on-path attacker *inside* the tailnet.** A compromised co-member device or a misconfigured subnet router can sit between two peers it is allowed to talk to. WireGuard protects the tunnel from outside the peers; TLS protects the request from anything between the service and the client.
+3. **Secure-context browser APIs.** Service workers, clipboard, camera and geolocation all require a secure context. A future browser UI ([#87](https://github.com/LuisEduardoAvila/guaipeca/issues/87)) that wants any of them will need `https://` regardless of the network underneath.
+4. **Compliance and expectation.** "Encrypted in transit" is usually read as TLS. Explaining WireGuard to an auditor is a conversation; a cert is not.
+
+None of these is load-bearing today, which is why the recommendation stands. But they are the reasons `tailscale cert` is listed as a one-command follow-up rather than something to argue against.
+
 ## Why not loopback forever
 
 It is the most secure and the least useful. The read paths (`search`, `get_document`) are the point of the service, and they are wanted from a phone and from other machines. Loopback-only means every client needs its own tunnel, which is the same overlay network with more steps.
@@ -32,23 +41,31 @@ It is the most secure and the least useful. The read paths (`search`, `get_docum
 
 The phrase "non-local" hides four situations with different requirements. This table is the normative part of the document.
 
-| Class | Example | Encrypted? | Token required? | Can bind? |
+**Read the two middle columns carefully.** They describe what the *code enforces*; only the right-hand column describes *policy*. `_check_bind_exposure` distinguishes exactly two states: loopback (bindable, announced if tokenless) and everything else (refused unless a token is set). It does not classify anything in between — a `192.168.x` address, a `100.64.0.0/10` address, `0.0.0.0`, and a public IP are all identical to it.
+
+| Class | Example | Encrypted in transit? | What the code enforces | Recommended posture (policy, not enforced) |
 |---|---|---|---|---|
-| **Loopback** | `127.0.0.1`, `::1` | N/A (no wire) | No, but announced | Yes |
-| **Tailnet** | `100.64.0.0/10`, `fd7a:115c:a1e0::/48` | Yes, WireGuard | **Yes** | Yes |
-| **LAN** | `192.168.0.0/16`, `10.0.0.0/8`, `172.16.0.0/12` | No | Yes, and plaintext is the residual risk | **No** — use a tunnel |
-| **Public** | any routable address | No | Yes, and this is still wrong | **No** |
+| **Loopback** | `127.0.0.1`, `::1` | N/A (no wire) | Binds freely; announcement when tokenless | Fine. Also the target when a proxy terminates TLS in front. |
+| **Tailnet** | `100.64.0.0/10`, `fd7a:115c:a1e0::/48` | Yes, WireGuard | **Token required** | Recommended for reaching other machines. Bind the specific address. |
+| **LAN** | `192.168.0.0/16`, `10.0.0.0/8`, `172.16.0.0/12` | **No** | **Token required** — same as any other non-loopback bind | Discouraged. Use a tunnel instead. If you must, know that queries, results, document text and `/download` payloads are all readable on the segment — not just the token. |
+| **Wildcard / public** | `0.0.0.0`, `::`, any routable IP | No | **Token required** — same as any other non-loopback bind | Discouraged. Reaching a public address without TLS is not a supported configuration. |
 
 Two things follow from this table:
 
-- **The token is required on every non-loopback bind, including the tailnet.** Tailscale authenticates *devices*, not *users of the service*. A compromised phone in your tailnet is an authenticated device. The token is what separates "on my network" from "allowed to read my documents". This is why the conservative choice costs nothing: the existing `_check_bind_exposure` already enforces exactly this rule, and it needs no change.
-- **A Tailscale bind is not a public bind.** It is also not a loopback bind. The current check treats it as the former and warns/refuses accordingly, which is *correct but under-explained* — the error message tells the operator to set a token, which is the right instruction, but it does not say that a tailnet bind is a supported and expected configuration. That is a documentation fix, not a code fix.
+- **The token is required on every non-loopback bind, including the tailnet, and that is the only thing the code enforces.** Tailscale authenticates *devices*, not *users of the service*. A compromised phone in your tailnet is an authenticated device. The token is what separates "on my network" from "allowed to read my documents".
+- **The policy column is advice, not an interlock.** Nothing stops an operator from binding a public address with a token; the code cannot tell that bind apart from a tailnet one. The controls that actually bound exposure live outside this process: what you publish in `docker-compose.yml`, your firewall, and your tailnet ACLs. This document's recommendation is therefore a recommendation, and the failure mode it does not prevent is deliberate misconfiguration.
 
 ## Why the bind check stays conservative
 
 The temptation is to teach `_check_bind_exposure` about `100.64.0.0/10` and skip the warning, on the grounds that a tailnet address is not publicly reachable. The reason not to:
 
-**The assumption decays.** Today the machine has `tailscale0`, `end0` and a pile of docker bridges. Tomorrow it has a subnet router, a second physical interface, or an exit node configured differently. The check's job is to be dumb enough that a change in network topology cannot silently turn a guarded configuration into an unguarded one. A check that reasons about address classes has to be correct about every interface, on every host, forever; a check that asks "is this loopback?" is correct by construction.
+**The real reason is that reachability is unknowable, not that addresses are unclassifiable.** A process *can* trivially classify an address: `ipaddress` alone separates RFC1918 from `100.64.0.0/10` from a globally-routable one, and `getifaddrs` reveals interface flags. What it cannot determine is **who can route to that interface** — whether a subnet router exposes the tailnet to a LAN, whether a port-forward maps this bind to a WAN address, whether a bridge network is published on the host's uplink. That is the question the policy is actually about, and it is not answerable from inside the process.
+
+An earlier draft of this section argued that the process "cannot classify addresses" and that the loopback check is "correct by construction". Both claims overstate the case. The check is not correct by construction — once a token is set it exercises no control at all, and any public bind passes. And whitelisting `100.64.0.0/10` would not in itself be fragile: it compares a string, not live interface state.
+
+The argument that actually holds is narrower: **a whitelist of "trusted" address classes is a permanent exemption for a property the process cannot verify.** "This bind is on the tailnet" is a claim about deployment, and deployments drift. Today `100.64.0.0/10` means a WireGuard tunnel; tomorrow the same host may route that range differently, or the operator may bind a subnet router's address. The check cannot tell, so it should not be asked to.
+
+**The consequence is honest and worth stating plainly:** the check enforces one thing — no token, no non-loopback bind — and it does not enforce the policy column of the table above. The policy is enforced by what the operator publishes and routes, not by this process.
 
 There is no override flag, and there should not be one. The existing docstring already says this: *"An operator who wants the service reachable sets an `auth_token`; one who does not want auth keeps the bind on loopback and reaches it through a tunnel."* That sentence is the whole policy, and Tailscale is the tunnel.
 
@@ -60,12 +77,14 @@ Almost nothing, which is the point.
 
 ### 1. Documentation (the real work)
 
-- **`docs/container-deployment.md`** gains a "Reaching it from another machine" section: bind `server.host` to the tailnet address, set `GUAIPECA_AUTH_TOKEN`, add the MagicDNS origin to `server.allowed_origins`.
+- **`docs/container-deployment.md`** describes the container-specific shape, which differs from the bare-metal one below — see §2. Container exposure is controlled by **host-side port publishing**, not by `server.host`, because a bridge-mode container cannot bind the host's tailnet address. Its `auth_token` instructions now state that the token is required, not optional.
 - **This document** records the trust classes so the next person does not have to re-derive them.
 
 ### 2. Bind-address strategy
 
-Bind to the interface address, not `0.0.0.0`:
+Two shapes, and they are not interchangeable.
+
+**Bare metal / systemd — bind the interface address:**
 
 ```yaml
 server:
@@ -77,7 +96,19 @@ server:
 
 `0.0.0.0` would also listen on `end0` (the LAN) and every docker bridge. The bind check cannot distinguish those from the tailnet one because it only sees what was asked for, so binding to the specific address is the control that matters here. It is also the honest statement of intent.
 
-**Startup ordering:** `tailscale0` may not have an address when the service starts. Binding to an address that does not exist yet fails, and should fail loudly rather than fall back to `0.0.0.0`. If this becomes a problem in the container deployment, the fix is `ExecStartPre=` waiting for the interface, not a `0.0.0.0` fallback.
+**Container (bridge networking) — keep `0.0.0.0` inside, publish narrowly on the host:**
+
+```yaml
+# docker-compose.yml
+ports:
+  - "127.0.0.1:8090:8090"   # host loopback only; reach it via a tunnel
+# or
+  - "100.x.y.z:8090:8090"   # publish on this host's tailnet address only
+```
+
+Inside a bridge-mode container, `server.host: 0.0.0.0` means "the container's own interfaces" — it is not host exposure, and binding it to the host's tailnet address does not work without host networking. The exposure decision is therefore entirely in the port mapping, and the token is still required because the container sees a non-loopback bind.
+
+**Startup ordering (bare metal):** `tailscale0` may not have an address when the service starts. Binding to an address that does not exist yet fails, and should fail loudly rather than fall back to `0.0.0.0`. The systemd fix is `ExecStartPre=` waiting for the interface; in a container, the port binding simply fails and the container restarts, which is the equivalent loud failure.
 
 ### 3. CORS origins
 
@@ -105,11 +136,21 @@ Worth writing down in the deployment doc that the default (before any ACL) is "e
 
 ## Success criteria for closing #69
 
-- [ ] `docs/container-deployment.md` documents the tailnet bind recipe, including the token requirement and the exact `allowed_origins` entry
-- [ ] The doc states that `0.0.0.0` is not the recommended way to serve a tailnet client, and why
-- [ ] A container deployment exists (or is documented) with `server.host` on the tailnet address and a token set
-- [ ] `_check_bind_exposure` is **unchanged** — if a code change appears necessary, that is a signal the design drifted, not that the check is wrong
-- [ ] The trust-class table above is referenced from `docs/ARCHITECTURE.md`
+**Done by this document:**
+
+- [x] The chosen posture is stated explicitly: where the service listens, what encrypts the traffic, and what the operator must configure
+- [x] The trust-class table (§"The trust classes") is recorded and referenced from `docs/ARCHITECTURE.md`'s "Network exposure" section
+- [x] Both deployment shapes are described — bare-metal bind-to-address, and container publish-narrowly — with the reason they differ
+
+**Operator tasks, not code — tracked in #69 until done:**
+
+- [ ] A deployment is actually running with the narrow publish (or the specific bind) and a token set
+- [ ] `docs/container-deployment.md` has its `auth_token` language corrected so `host: 0.0.0.0` is never presented as optional-token
+- [ ] Issue #69's acceptance criterion "`docs/` gains a short *Deployment security posture* section" — either add one that points here, or amend the criterion to say this document is it
+
+**Guard for the next person:**
+
+- [ ] `_check_bind_exposure` is **unchanged**. If a code change appears necessary, that is a signal the design drifted, not that the check is wrong. The check enforces "token or loopback" and nothing else — do not add address-class exemptions to it.
 
 ## Non-goals
 

@@ -639,9 +639,10 @@ Push to `main` triggers a GitHub Actions workflow that:
   ```
   An overlay bind still **requires `auth_token`**: the network authenticates
   *devices*, not *users of the service*, and a compromised device on your tailnet is
-  still an authenticated device. Transport is already encrypted by WireGuard, so
-  application-level TLS adds nothing there; it is only required if you ever serve a
-  plain LAN address or a public hostname. See
+  still an authenticated device. WireGuard already encrypts the transport, so app-level
+  TLS is not required for confidentiality there — though it remains worth doing if you
+  want the client to verify a named server, defend against an on-path peer inside the
+  tailnet, or use secure-context browser APIs. See
   [docs/network-access-design.md](docs/network-access-design.md) for the trust-class
   table and the tailnet ACL recipe.
 - **Authentication:** Set `auth_token` in the server config to require

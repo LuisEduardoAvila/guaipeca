@@ -276,16 +276,21 @@ Ten tools are exposed:
 ### Network exposure
 
 `_check_bind_exposure()` refuses to start when `server.host` is not loopback and no
-`auth_token` is configured. The check is deliberately address-class-blind: it asks
-"is this loopback?" and treats everything else the same, including an overlay-network
-address such as a Tailscale `100.64.0.0/10` address. The reasoning — and the rule that
-the check should stay unchanged — is in
-[`network-access-design.md`](network-access-design.md).
+`auth_token` is configured. That is the entire rule: it distinguishes loopback from
+everything else and nothing further. A `192.168.x` address, a Tailscale `100.64.0.0/10`
+address, `0.0.0.0` and a public IP are all treated identically — with a token they all
+bind, without one they all refuse.
+
+It is deliberately not made address-class-aware, for a reason narrower than "the process
+cannot classify addresses" (it easily can): classifying an address says nothing about
+**who can route to it**, and a permanent exemption for a "trusted" range is a promise the
+process cannot keep once deployment topology changes. See
+[`network-access-design.md`](network-access-design.md) — the trust-class table there is
+policy and advice, not enforcement.
 
 Summary: reach the service over an encrypted overlay (Tailscale/WireGuard) rather than
-a plaintext LAN bind, bind to the specific overlay address rather than `0.0.0.0`, and
-keep the token required even on the tailnet, because an overlay authenticates devices,
-not service users.
+a plaintext LAN bind, publish narrowly rather than broadly, and keep the token required
+even on the tailnet, because an overlay authenticates devices, not service users.
 
 ### Error sanitization
 

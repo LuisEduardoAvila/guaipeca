@@ -32,7 +32,10 @@ cp config/guaipeca.container.yaml data/config/guaipeca.yaml
 
 Edit `data/config/guaipeca.yaml`:
 - Update `corpora` sections with your corpus names and paths
-- Set `auth_token` if you want authentication
+- **`auth_token` is required**, not optional: the container config binds `0.0.0.0`, and the
+  server refuses to start on a non-loopback bind with no token. Supply it through
+  `GUAIPECA_AUTH_TOKEN` (preferred — keeps the secret out of the file) or set
+  `server.auth_token` here. `docker compose` will refuse to start if the variable is missing.
 - Adjust `search.hybrid` if you want BM25 hybrid search
 
 ### Step 4: Add Source Documents
@@ -152,11 +155,17 @@ mkdir -p data/{config,corpora,index,models}
 ```bash
 docker run -d \
   --name guaipeca \
-  -p 8090:8090 \
+  -e GUAIPECA_AUTH_TOKEN="$GUAIPECA_AUTH_TOKEN" \
+  -p 127.0.0.1:8090:8090 \
   -v $(pwd)/data:/data \
   --restart unless-stopped \
   ghcr.io/luis-eduardo-avila/guaipeca:latest
 ```
+
+The `-e GUAIPECA_AUTH_TOKEN` is required: the container config binds `0.0.0.0`, so the
+server refuses to start without a token. The `127.0.0.1:` prefix on the port mapping
+publishes only on host loopback; drop it to publish on every host interface, or use a
+tailnet address instead.
 
 ## Option 3: Build from Source
 
@@ -214,7 +223,7 @@ docker compose down
 
 | Setting | Container Value | Notes |
 |---------|----------------|-------|
-| `server.host` | `0.0.0.0` | Bind to all interfaces for container access |
+| `server.host` | `0.0.0.0` | The *container's* interfaces, not the host's. Host exposure is decided by the port mapping — see "Reaching the Container From Another Machine". A token is required. |
 | `server.transport` | `http` | No stdio needed in container; serves Streamable HTTP (`POST /mcp`) and legacy SSE |
 | `server.port` | `8090` | Exposed in Dockerfile |
 | `embedding.cache_dir` | `/data/models` | Volume-mounted, persists across restarts |
