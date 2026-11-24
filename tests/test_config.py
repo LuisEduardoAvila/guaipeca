@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 
+import pytest
 import yaml
 
 from guaipeca.config import (
@@ -228,3 +229,169 @@ def test_known_keys_do_not_warn(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="guaipeca.config"):
         GuaipecaConfig.from_yaml(_write(tmp_path, _full_config_dict(tmp_path)))
     assert _warnings(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #66+99: config validation rejects wrong types and out-of-range values
+# ---------------------------------------------------------------------------
+
+
+class TestConfigValidation:
+    """Validation for every field the issue calls out."""
+
+    # fusion_alpha (issue #99)
+
+    def test_fusion_alpha_out_of_range_rejected(self, tmp_path):
+        for val in [5.0, -2.0]:
+            data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                    "search": {"fusion_alpha": val}}
+            with pytest.raises(ValueError, match=r"fusion_alpha.*\[0, 1\]"):
+                GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    def test_fusion_alpha_boundaries_accepted(self, tmp_path):
+        for val in [0.0, 0.3, 1.0]:
+            data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                    "search": {"fusion_alpha": val}}
+            cfg = GuaipecaConfig.from_yaml(_write(tmp_path, data))
+            assert cfg.search.fusion_alpha == val
+
+    def test_fusion_alpha_wrong_type_rejected(self, tmp_path):
+        for val in ["0.3", True]:
+            data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                    "search": {"fusion_alpha": val}}
+            with pytest.raises(ValueError, match=r"fusion_alpha"):
+                GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    # toc_rerank_weight
+
+    def test_toc_rerank_weight_negative_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                "search": {"toc_rerank_weight": -1.0}}
+        with pytest.raises(ValueError, match="toc_rerank_weight"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    def test_toc_rerank_weight_wrong_type_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                "search": {"toc_rerank_weight": "x"}}
+        with pytest.raises(ValueError, match="toc_rerank_weight"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    # toc_rerank
+
+    def test_toc_rerank_string_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                "search": {"toc_rerank": "yes"}}
+        with pytest.raises(ValueError, match="toc_rerank must be a boolean"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    # corpus.weight
+
+    def test_corpus_weight_negative_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path), "weight": -1}]}
+        with pytest.raises(ValueError, match="weight.*>= 0"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    def test_corpus_weight_bool_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path), "weight": True}]}
+        with pytest.raises(ValueError, match="weight.*must be a number"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    def test_corpus_weight_zero_accepted(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path), "weight": 0}]}
+        cfg = GuaipecaConfig.from_yaml(_write(tmp_path, data))
+        assert cfg.corpora[0].weight == 0
+
+    # rrf_k bool-as-int
+
+    def test_rrf_k_bool_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                "search": {"rrf_k": True}}
+        with pytest.raises(ValueError, match="rrf_k"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    # max_body_size upper bound
+
+    def test_max_body_size_exceeds_upper_bound_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                "server": {"max_body_size": 2_000_000_000}}
+        with pytest.raises(ValueError, match="max_body_size.*1 GB"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    # upload.allow type check
+
+    def test_upload_allow_string_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                "upload": {"allow": "mydocs"}}
+        with pytest.raises(ValueError, match="upload.allow"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    # upload.max_file_size
+
+    def test_upload_max_file_size_negative_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                "upload": {"max_file_size": -100}}
+        with pytest.raises(ValueError, match="upload.max_file_size"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    # CorpusConfig.extensions=None coercion
+
+    def test_corpus_extensions_none_coerced(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path), "extensions": None}]}
+        cfg = GuaipecaConfig.from_yaml(_write(tmp_path, data))
+        assert cfg.corpora[0].extensions == [".md", ".txt"]
+
+    # Bool-as-int for other integer fields
+
+    def test_chunking_max_size_bool_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                "chunking": {"max_size": True}}
+        with pytest.raises(ValueError, match="chunking.max_size"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    def test_chunking_overlap_bool_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                "chunking": {"overlap": True}}
+        with pytest.raises(ValueError, match="chunking.overlap"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    def test_indexing_max_file_size_bool_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                "indexing": {"max_file_size": True}}
+        with pytest.raises(ValueError, match="indexing.max_file_size"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    def test_server_port_bool_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                "server": {"port": True}}
+        with pytest.raises(ValueError, match="server.port"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    def test_search_max_chars_bool_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                "search": {"max_chars": True}}
+        with pytest.raises(ValueError, match="max_chars"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    # Float fields bool-as-int
+
+    def test_bm25_weight_bool_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                "search": {"bm25_weight": True}}
+        with pytest.raises(ValueError, match="bm25_weight"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    def test_dense_weight_bool_rejected(self, tmp_path):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                "search": {"dense_weight": True}}
+        with pytest.raises(ValueError, match="dense_weight"):
+            GuaipecaConfig.from_yaml(_write(tmp_path, data))
+
+    # max_body_size warning for > 100 MB
+
+    def test_max_body_size_warning_above_100mb(self, tmp_path, caplog):
+        data = {"corpora": [{"name": "t", "path": str(tmp_path)}],
+                "server": {"max_body_size": 200 * 1024 * 1024}}
+        with caplog.at_level(logging.WARNING, logger="guaipeca.config"):
+            cfg = GuaipecaConfig.from_yaml(_write(tmp_path, data))
+        messages = _warnings(caplog)
+        assert any("max_body_size" in m and "100 MB" in m for m in messages)
