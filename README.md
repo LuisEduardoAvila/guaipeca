@@ -34,7 +34,7 @@ Proven on a Raspberry Pi 5 (8GB RAM, ARM64) alongside other services. If it runs
 - **Content preprocessing** — heading + first 500 chars sent to embedder for better semantic signal; full text stored in metadata
 - **Concurrent** — read-write lock allows multiple simultaneous searches, exclusive indexing
 - **Runs anywhere** — ARM64 (Pi 5, ARM servers), x86_64 (laptops, VMs, dedicated servers), any Linux box with Python 3.12+ (3.13 recommended, and what the Docker image and Pi deployment run). Proven on Pi 5 with Python 3.13, ~90MB model + ~20MB FAISS
-- **Optional auth** — Bearer token authentication for HTTP transport
+- **Bearer token auth** — optional for a loopback bind, **required for every non-loopback HTTP bind** (the server refuses to start otherwise); CORS is additionally restricted when a token is set
 
 ## Quick Start
 

@@ -37,7 +37,7 @@ MCP Server (mcp_server.py)
   ├─ 10 tools: search, get_chunk, get_document, list_documents, index, status, list_folders, upload, delete, get_toc
   ├─ stdio transport (mcp SDK stdio_server)
   ├─ Streamable HTTP transport (mcp SDK, served by uvicorn)
-  ├─ Optional Bearer token auth
+  ├─ Bearer token auth (optional on loopback, required otherwise)
   └─ Error sanitization (path scrubbing, truncation)
 ```
 
@@ -268,7 +268,7 @@ Ten tools are exposed:
 
 ### Authentication
 
-- Optional Bearer token auth (`server.auth_token` config field)
+- Bearer token auth (`server.auth_token` config field) — optional on a loopback bind, **required for any non-loopback bind**; the server refuses to start if it is missing
 - When auth is enabled, CORS is restricted (`null` origin instead of `*`)
 - Origin validation (`_origin_allowed()`): requests with an unrecognised `Origin` get `403` before auth runs. Default policy accepts loopback origins only; `server.allowed_origins` (list of exact strings) replaces that default. A missing `Origin` is always allowed (non-browser clients). Validated origins are echoed in `Access-Control-Allow-Origin`.
 - Error messages are sanitized: absolute file paths replaced with `[path]`, messages truncated to 300 characters
