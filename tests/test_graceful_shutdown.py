@@ -81,14 +81,9 @@ def _patched_init(self, config):
     self.config = config
 def _patched_warmup(self):
     pass
-def _patched_handle_request(self, method, params):
-    if method == "ping":
-        return {{}}
-    return {{"error": {{"code": -32601, "message": "mock"}}}}
 
 GuaipecaMCPServer.__init__ = _patched_init
 GuaipecaMCPServer._warmup_model = _patched_warmup
-GuaipecaMCPServer.handle_request = _patched_handle_request
 
 class FakeConfig:
     def __init__(self):

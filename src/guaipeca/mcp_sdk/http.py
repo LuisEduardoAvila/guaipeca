@@ -136,13 +136,6 @@ def _allowed_origin_patterns(allowed_origins: list[str] | None) -> list[str]:
         return list(_LOOPBACK_ORIGIN_PATTERNS)
     # The old policy ignored a trailing "/". ``_origin_allowed`` compares raw
     # strings, so normalise here.
-    #
-    # A "*" in an entry is rejected loudly (#37): an operator writing
-    # "https://ui.example/*" means a wildcard, but matching is exact string
-    # comparison, so that entry would never match anything and every browser
-    # client would get 403 with no hint as to why. Failing at startup turns a
-    # silent misconfiguration into an install-time error. A bare "*" is not
-    # special either - there is no wildcard support to grant.
     patterns: list[str] = []
     for entry in allowed_origins:
         normalised = entry.rstrip("/")
