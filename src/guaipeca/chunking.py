@@ -429,8 +429,8 @@ def _chunk_by_paragraph(
                     heading_path=heading_path,
                     section_id=section_id,
                 ))
-                # P2-4: Extract overlap only from the original (non-overlap) content
-                # to prevent compounding of overlap across multiple splits
+                # Extract overlap from the ORIGINAL content only (not from
+                # a previous chunk's overlap) to prevent compounding.
                 original_content = current_text.strip()
                 if current_original_len > 0 and current_original_len < len(original_content):
                     original_content = original_content[:current_original_len]
@@ -440,12 +440,9 @@ def _chunk_by_paragraph(
                     overlap_text = original_content
                 offset += len(current_text) + 2
             current_text = candidate
-            # Track original content length (candidate = overlap_text + para).
-            # The overlap text is copied from the previous chunk, so only the
-            # paragraph itself counts as original content; the offset of the
-            # overlap region within the concatenated text is therefore
-            # len(overlap_text) + 2 (the "\n\n" separator).
-            current_original_len = len(overlap_text) + 2 + len(para) if overlap_text else len(candidate)
+            # Track original content length: only the new paragraph counts,
+            # not the overlap text carried from the previous chunk.
+            current_original_len = len(para)
         else:
             current_text = current_text + "\n\n" + candidate if current_text else candidate
             # The chunk now also contains this paragraph as original content;
