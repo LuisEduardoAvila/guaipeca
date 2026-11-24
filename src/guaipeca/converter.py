@@ -434,6 +434,43 @@ class Converter:
 
         return "\n".join(output_lines)
 
+    def _convert_zip_safe(self, file_path: str) -> str:
+        """Convert a .zip file with decompression-size limits.
+
+        Inspects the zip archive before conversion and rejects it when the
+        total uncompressed size or member count exceeds safe limits.
+        This prevents decompression-bomb attacks.
+        """
+        import zipfile
+
+        compressed_size = os.path.getsize(file_path)
+
+        with zipfile.ZipFile(file_path, "r") as zf:
+            # Check member count
+            members = zf.infolist()
+            member_count = len(members)
+            _MAX_ZIP_MEMBERS = 1000
+            if member_count > _MAX_ZIP_MEMBERS:
+                raise ValueError(
+                    f"Zip file has {member_count} members (max {_MAX_ZIP_MEMBERS}). "
+                    f"Refusing to extract to avoid resource exhaustion."
+                )
+
+            # Check total uncompressed size
+            total_uncompressed = sum(info.file_size for info in members)
+            # Cap: 200 MB absolute, or 10x compressed size, whichever is lower
+            _MAX_ZIP_UNCOMPRESSED = 200 * 1024 * 1024  # 200 MB
+            size_cap = min(_MAX_ZIP_UNCOMPRESSED, compressed_size * 10)
+            if total_uncompressed > size_cap:
+                raise ValueError(
+                    f"Zip file uncompressed size {total_uncompressed} bytes "
+                    f"exceeds cap {size_cap} bytes. Refusing extraction."
+                )
+
+        # Limits passed — delegate to markitdown for actual conversion
+        result = self.markitdown.convert(file_path)
+        return result.text_content or ""
+
     def convert(self, file_path: str) -> str:
         """
         Convert a file to markdown text.
@@ -472,6 +509,8 @@ class Converter:
         try:
             if ext == ".pdf":
                 markdown_text = self._convert_pdf_with_headings(file_path)
+            elif ext == ".zip":
+                markdown_text = self._convert_zip_safe(file_path)
             else:
                 result = self.markitdown.convert(file_path)
                 markdown_text = result.text_content or ""
