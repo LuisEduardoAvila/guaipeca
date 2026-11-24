@@ -138,7 +138,7 @@ def _allowed_origin_patterns(allowed_origins: list[str] | None) -> list[str]:
     # strings, so normalise here.
     patterns: list[str] = []
     for entry in allowed_origins:
-        normalised = entry.rstrip("/")
+        normalised = entry.strip().rstrip("/")
         if not normalised:
             # #79: an entry that normalises to empty is a configuration
             # mistake; name it instead of dropping it silently.
@@ -475,7 +475,8 @@ class _CorsMiddleware:
                         if key == b"vary"
                         for part in value.decode("latin-1").split(",")
                     ]
-                    if not any(part.lower() == "origin" for part in existing):
+                    # "*" already means "vary on everything" — don't append Origin.
+                    if "*" not in existing and not any(part.lower() == "origin" for part in existing):
                         existing.append("Origin")
                     headers = [(key, value) for key, value in headers if key != b"vary"]
                     headers.append((b"vary", ", ".join(existing).encode("latin-1")))

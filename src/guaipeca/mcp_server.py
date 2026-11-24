@@ -596,7 +596,7 @@ class GuaipecaMCPServer:
     def _handle_tool_call(self, params: dict) -> dict:
         """Handle a tools/call request."""
         tool_name = params.get("name")
-        arguments = params.get("arguments", {})
+        arguments = params.get("arguments") or {}
 
         # The reject call sits INSIDE the try: it does set(arguments or {}),
         # which raises TypeError on a non-iterable, and it used to run before
