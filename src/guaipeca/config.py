@@ -379,6 +379,11 @@ class GuaipecaConfig:
             raise ValueError(f"chunking.max_size must be a positive integer, got: {self.chunking.max_size!r}")
         if not isinstance(self.chunking.overlap, int) or isinstance(self.chunking.overlap, bool) or self.chunking.overlap < 0:
             raise ValueError(f"chunking.overlap must be a non-negative integer, got: {self.chunking.overlap!r}")
+        if self.chunking.overlap >= self.chunking.max_size:
+            raise ValueError(
+                f"chunking.overlap ({self.chunking.overlap}) must be less than "
+                f"chunking.max_size ({self.chunking.max_size})"
+            )
 
         # Indexing config
         if not isinstance(self.indexing.max_file_size, int) or isinstance(self.indexing.max_file_size, bool) or self.indexing.max_file_size < 1:

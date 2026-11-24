@@ -310,17 +310,38 @@ class Converter:
                 # keeps the chunker's H2 section boundaries intact.
                 heading_level_size: float | None = None
                 heading_is_label = False  # current heading is a bare label
+                # Track the last emitted marker for duplicate suppression
+                # (output_lines[-1] is always blank after heading emission).
+                last_marker: list[str | None] = [None]
+                # Track a pending bare label across blocks. The original
+                # _bridge_label scanned output_lines backward, but
+                # output_lines[-1] is always blank after every heading,
+                # so the scan never found the label. We carry the label
+                # state instead and merge at the next block's first heading.
+                pending_label: tuple[int, str, float, list[str]] | None = None
 
-                def _flush_heading() -> None:
+                def _flush_heading(
+                    _last_marker: list[str | None] = last_marker,
+                ) -> None:
                     """Emit and reset the pending heading accumulator."""
-                    nonlocal heading_parts, heading_size, heading_level_size, heading_is_label
+                    nonlocal heading_parts, heading_size, heading_level_size, heading_is_label, pending_label
                     if heading_parts:
                         _emit_heading(
                             heading_parts,
                             heading_level_size if heading_level_size is not None else heading_size,
                             size_to_level,
                             output_lines, emitted_headings,
+                            _last_marker,
                         )
+                        # If this was a bare label (not merged with a title),
+                        # save it for the next block's first heading.
+                        if heading_is_label:
+                            text = " ".join(heading_parts)
+                            level = size_to_level.get(
+                                heading_level_size if heading_level_size is not None else heading_size,
+                                2,
+                            )
+                            pending_label = (level, text, heading_size)
                     heading_parts = []
                     heading_size = None
                     heading_level_size = None
@@ -340,11 +361,31 @@ class Converter:
                     if max_size in size_to_level:
                         # Heading-sized line.
                         if not heading_parts:
-                            # Start a new heading.
-                            heading_parts = [line_text]
-                            heading_size = max_size
-                            heading_level_size = max_size
-                            heading_is_label = bool(_BARE_SECTION_LABEL.match(line_text))
+                            # Check for a pending bare label from the previous
+                            # block and merge if the sizes match.
+                            if (pending_label is not None
+                                    and max_size == pending_label[2]):
+                                # Merge: label + title into one heading.
+                                # Seed the accumulator with BOTH parts and let
+                                # _flush_heading emit it once through
+                                # _emit_heading, so last_marker, hyphen joining
+                                # and duplicate suppression all apply. Emitting
+                                # inline here as well double-emitted the title
+                                # (## 30 Chapter + ## Chapter).
+                                label_text = pending_label[1]
+                                label_size = pending_label[2]
+                                pending_label = None
+                                heading_parts = [label_text, line_text]
+                                heading_size = max_size
+                                # The label's size carries the chapter level.
+                                heading_level_size = label_size
+                                heading_is_label = False
+                            else:
+                                # Start a new heading.
+                                heading_parts = [line_text]
+                                heading_size = max_size
+                                heading_level_size = max_size
+                                heading_is_label = bool(_BARE_SECTION_LABEL.match(line_text))
                         elif heading_is_label and max_size != heading_size:
                             # Case (b): bare label followed by the title at a
                             # different size — merge, keep the label's level.
@@ -372,14 +413,11 @@ class Converter:
                         _flush_heading()
                         output_lines.append(_escape_heading_marks(line_text))
 
-                # End of block: flush any pending heading, then apply the
-                # cross-block label bridge for double-digit chapter numbers.
+                # End of block: flush any pending heading.
+                # (Label bridging is handled inline when the next block
+                # starts a new heading.)
                 _flush_heading()
-                _bridge_label(output_lines, emitted_headings)
             output_lines.append("")  # page break separator
-
-        # Final bridge in case the document ends on a pending label.
-        _bridge_label(output_lines, emitted_headings)
 
         doc.close()
 
@@ -453,67 +491,6 @@ class Converter:
         return ext in allowed_extensions
 
 
-def _bridge_label(
-    output_lines: list[str],
-    emitted_headings: list[tuple[int, str, float]],
-) -> None:
-    """Merge a bare section-label heading with the chapter title that follows.
-
-    For double-digit chapter numbers pymupdf emits the (larger) number as its
-    OWN block and the chapter title in the NEXT block.  By the time this is
-    called the label block has been flushed, so we look for a trailing bare
-    label heading in ``output_lines`` and, if the immediately following
-    non-blank line is a heading at equal-or-deeper level, fold the title into
-    the label line (keeping the label's level).
-
-    Only bridges numeric labels; a lone letter like "A" is usually a real
-    standalone heading.  Never merges when body text sits between the two.
-    """
-    idx = len(output_lines) - 1
-    while idx >= 0 and output_lines[idx] == "":
-        idx -= 1
-    if idx < 0:
-        return
-
-    m = re.match(r"^(#{1,6})\s+(.+)$", output_lines[idx])
-    if not m:
-        return
-    label_text = m.group(2).strip()
-    if not _BARE_SECTION_LABEL.match(label_text) or not label_text[0].isdigit():
-        return
-
-    nxt = idx + 1
-    while nxt < len(output_lines) and output_lines[nxt] == "":
-        nxt += 1
-    if nxt >= len(output_lines):
-        return  # title not seen yet — nothing to bridge
-
-    m2 = re.match(r"^(#{1,6})\s+(.+)$", output_lines[nxt])
-    if not m2:
-        return  # body text follows, not a heading
-    label_level = len(m.group(1))
-    next_level = len(m2.group(1))
-    if next_level < label_level:
-        return  # shallower heading is not the chapter title
-    next_text = m2.group(2).strip()
-    if _BARE_SECTION_LABEL.match(next_text):
-        return  # avoid chaining two labels together
-
-    output_lines[idx] = f"{'#' * label_level} {label_text} {next_text}"
-    del output_lines[nxt]
-
-    for i in range(len(emitted_headings) - 1, -1, -1):
-        lvl, text, sz = emitted_headings[i]
-        if text.strip() == label_text and lvl == label_level:
-            emitted_headings[i] = (lvl, f"{label_text} {next_text}", sz)
-            if (
-                i + 1 < len(emitted_headings)
-                and emitted_headings[i + 1][1].strip() == next_text
-            ):
-                del emitted_headings[i + 1]
-            break
-
-
 def _join_hyphenated(text: str) -> str:
     """Rejoin a title that was wrapped at a hyphen during PDF typesetting.
 
@@ -547,6 +524,7 @@ def _emit_heading(
     size_to_level: dict[float, int],
     output_lines: list[str],
     emitted_headings: list[tuple[int, str, float]],
+    last_marker: list[str | None] | None = None,
 ) -> None:
     """Emit a (possibly stitched) heading as a markdown line.
 
@@ -556,17 +534,25 @@ def _emit_heading(
 
     Duplicate consecutive headings (same level + text) are suppressed.
     A title wrapped at a hyphen ("Decision- Making") is joined back together.
+
+    *last_marker* is an optional single-element list that tracks the last
+    emitted marker across calls (needed because ``output_lines[-1]`` is
+    always a blank line after every heading emission).
     """
     text = _join_hyphenated(" ".join(parts))
     level = size_to_level[size]
     prefix = "#" * level
     marker = f"{prefix} {text}"
-    # Suppress exact-duplicate consecutive headings
-    if output_lines and output_lines[-1] == marker:
+    # Suppress exact-duplicate consecutive headings.
+    # We track the last marker in a list because output_lines[-1] is always
+    # the blank line appended after the previous heading.
+    if last_marker and last_marker[0] == marker:
         return
     output_lines.append(marker)
     output_lines.append("")  # blank line after heading
     emitted_headings.append((level, text, size))
+    if last_marker:
+        last_marker[0] = marker
 
 
 def _validate_heading_tree(
