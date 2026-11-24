@@ -590,11 +590,17 @@ Guaipeca ships with a Docker container for easy deployment on any platform (ARM6
 ```bash
 docker build -t guaipeca .
 docker run -d --name guaipeca \
-  -p 8090:8090 \
+  -e GUAIPECA_AUTH_TOKEN="$GUAIPECA_AUTH_TOKEN" \
+  -p 127.0.0.1:8090:8090 \
   -v ./data:/data \
   --restart unless-stopped \
   guaipeca
 ```
+
+`127.0.0.1:` publishes on host loopback only — reach it from other machines with an
+SSH tunnel or Tailscale rather than by dropping the prefix. The token is required
+(the container binds `0.0.0.0` internally). See
+[docs/network-access-design.md](docs/network-access-design.md).
 
 > **Note:** Pre-built images will be available on ghcr.io after the first
 > push to `main` triggers the CI/CD pipeline. Until then, build from source

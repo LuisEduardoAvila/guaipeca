@@ -179,7 +179,8 @@ docker build -t guaipeca:local .
 # Run
 docker run -d \
   --name guaipeca \
-  -p 8090:8090 \
+  -e GUAIPECA_AUTH_TOKEN="$GUAIPECA_AUTH_TOKEN" \
+  -p 127.0.0.1:8090:8090 \
   -v $(pwd)/data:/data \
   --restart unless-stopped \
   guaipeca:local
