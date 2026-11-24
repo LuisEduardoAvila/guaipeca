@@ -14,7 +14,13 @@ services:
     container_name: guaipeca
     restart: unless-stopped
     ports:
-      - "8090:8090"
+      # Host loopback only. The container listens on 0.0.0.0 *inside* the
+      # container; this mapping is what decides who can reach it. Drop the
+      # prefix only if you actually want it on every host interface — see
+      # docs/network-access-design.md. To reach it from other machines, either
+      # publish on a tailnet address ("100.x.y.z:8090:8090") or keep this and
+      # tunnel in (ssh -L 8090:127.0.0.1:8090, or `tailscale serve`).
+      - "127.0.0.1:8090:8090"
     volumes:
       - ./data:/data
     environment:

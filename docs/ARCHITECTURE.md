@@ -37,7 +37,7 @@ MCP Server (mcp_server.py)
   ├─ 10 tools: search, get_chunk, get_document, list_documents, index, status, list_folders, upload, delete, get_toc
   ├─ stdio transport (mcp SDK stdio_server)
   ├─ Streamable HTTP transport (mcp SDK, served by uvicorn)
-  ├─ Optional Bearer token auth
+  ├─ Bearer token auth (optional on loopback, required otherwise)
   └─ Error sanitization (path scrubbing, truncation)
 ```
 
@@ -268,10 +268,29 @@ Ten tools are exposed:
 
 ### Authentication
 
-- Optional Bearer token auth (`server.auth_token` config field)
+- Bearer token auth (`server.auth_token` config field) — optional on a loopback bind, **required for any non-loopback bind**; the server refuses to start if it is missing
 - When auth is enabled, CORS is restricted (`null` origin instead of `*`)
 - Origin validation (`_origin_allowed()`): requests with an unrecognised `Origin` get `403` before auth runs. Default policy accepts loopback origins only; `server.allowed_origins` (list of exact strings) replaces that default. A missing `Origin` is always allowed (non-browser clients). Validated origins are echoed in `Access-Control-Allow-Origin`.
 - Error messages are sanitized: absolute file paths replaced with `[path]`, messages truncated to 300 characters
+
+### Network exposure
+
+`_check_bind_exposure()` refuses to start when `server.host` is not loopback and no
+`auth_token` is configured. That is the entire rule: it distinguishes loopback from
+everything else and nothing further. A `192.168.x` address, a Tailscale `100.64.0.0/10`
+address, `0.0.0.0` and a public IP are all treated identically — with a token they all
+bind, without one they all refuse.
+
+It is deliberately not made address-class-aware, for a reason narrower than "the process
+cannot classify addresses" (it easily can): classifying an address says nothing about
+**who can route to it**, and a permanent exemption for a "trusted" range is a promise the
+process cannot keep once deployment topology changes. See
+[`network-access-design.md`](network-access-design.md) — the trust-class table there is
+policy and advice, not enforcement.
+
+Summary: reach the service over an encrypted overlay (Tailscale/WireGuard) rather than
+a plaintext LAN bind, publish narrowly rather than broadly, and keep the token required
+even on the tailnet, because an overlay authenticates devices, not service users.
 
 ### Error sanitization
 
