@@ -87,9 +87,10 @@ class CorpusConfig:
     def __post_init__(self):
         # Expand ~ in path
         self.path = os.path.expanduser(self.path)
-        # Normalize extensions to lowercase with leading dot
+        # Normalize extensions to lowercase with leading dot.
+        # Consumers compare Path(filename).suffix.lower().
         self.extensions = [
-            ext if ext.startswith(".") else f".{ext}"
+            (ext if ext.startswith(".") else f".{ext}").lower()
             for ext in self.extensions
         ]
 
@@ -170,9 +171,10 @@ class UploadConfig:
     replace: dict[str, bool] = field(default_factory=dict)
 
     def __post_init__(self):
-        # Normalize extensions to have a leading dot, mirroring CorpusConfig.
+        # Normalize extensions to have a leading dot and be lowercase,
+        # mirroring CorpusConfig. Consumers compare Path(filename).suffix.lower().
         self.allowed_extensions = [
-            ext if ext.startswith(".") else f".{ext}"
+            (ext if ext.startswith(".") else f".{ext}").lower()
             for ext in self.allowed_extensions
         ]
 
@@ -359,6 +361,20 @@ class GuaipecaConfig:
         if not isinstance(self.indexing.max_file_size, int) or self.indexing.max_file_size < 1:
             raise ValueError(f"indexing.max_file_size must be a positive integer, got: {self.indexing.max_file_size!r}")
 
+        # Upload config
+        if not isinstance(self.upload.max_file_size, int) or isinstance(self.upload.max_file_size, bool) or self.upload.max_file_size < 1:
+            raise ValueError(
+                f"upload.max_file_size must be a positive integer, "
+                f"got: {self.upload.max_file_size!r}"
+            )
+        if not isinstance(self.upload.auto_index, bool):
+            raise ValueError(f"upload.auto_index must be a boolean, got: {type(self.upload.auto_index).__name__}")
+        if not isinstance(self.upload.allow, list) or not all(isinstance(a, str) for a in self.upload.allow):
+            raise ValueError(
+                f"upload.allow must be a list of strings, got: "
+                f"{self.upload.allow!r}"
+            )
+
         # Embedding config
         if not isinstance(self.embedding.dimensions, int) or self.embedding.dimensions < 1:
             raise ValueError(f"embedding.dimensions must be a positive integer, got: {self.embedding.dimensions!r}")
@@ -452,6 +468,18 @@ class GuaipecaConfig:
                 "search.max_distance must be null or a number >= 0 "
                 f"(1 - cosine similarity), got: {self.search.max_distance!r}"
             )
+        if not isinstance(self.search.toc_rerank_weight, (int, float)) or isinstance(self.search.toc_rerank_weight, bool):
+            raise ValueError(
+                f"search.toc_rerank_weight must be a number, "
+                f"got: {self.search.toc_rerank_weight!r}"
+            )
+        if not isinstance(self.search.fusion_alpha, (int, float)) or isinstance(self.search.fusion_alpha, bool):
+            raise ValueError(
+                f"search.fusion_alpha must be a number in [0, 1], "
+                f"got: {self.search.fusion_alpha!r}"
+            )
+        if not isinstance(self.search.toc_rerank, bool):
+            raise ValueError(f"search.toc_rerank must be a boolean, got: {type(self.search.toc_rerank).__name__}")
 
     def get_corpus(self, name: str) -> CorpusConfig | None:
         """Find a corpus by name."""
