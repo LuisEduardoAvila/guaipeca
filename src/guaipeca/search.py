@@ -189,7 +189,10 @@ class Searcher:
                     dense_results, dropped = self._filter_by_distance(dense_results, floor)
                     filtered_by_distance += dropped
                 sparse_results = corpus_idx.search_bm25(query, top_k=per_corpus_k)
-                fused = self._rrf_fuse(dense_results, sparse_results, top_k=per_corpus_k)
+                fused = self._rrf_fuse(
+                    dense_results, sparse_results, top_k=per_corpus_k,
+                    corpus_weight=corpus_idx.corpus.weight,
+                )
                 all_results.extend(fused)
         else:
             # Dense-only mode (original behavior)
@@ -326,6 +329,7 @@ class Searcher:
         dense_results: list[dict],
         sparse_results: list[dict],
         top_k: int,
+        corpus_weight: float = 1.0,
     ) -> list[dict]:
         """Fuse dense and sparse results using score-normalized RRF.
 
@@ -409,9 +413,13 @@ class Searcher:
             reverse=True,
         )
 
+        # Apply the corpus weight, matching the dense-only path where
+        # ``index.py`` multiplies the score by ``corpus.weight``. Without
+        # this, hybrid mode silently ignores per-corpus weights because
+        # the RRF score is rebuilt from rank + normalized raw score.
         # Set score to rrf_score for consistent sorting in merge
         for r in fused:
-            r["score"] = r["rrf_score"]
+            r["score"] = r["rrf_score"] * corpus_weight
 
         return fused[:top_k]
 
@@ -697,7 +705,10 @@ class Searcher:
                     if r["chunk_id"].split(":", 1)[1] in section_chunk_ids
                 ]
                 if filtered_bm25:
-                    fused = self._rrf_fuse(results, filtered_bm25, top_k=top_k)
+                    fused = self._rrf_fuse(
+                        results, filtered_bm25, top_k=top_k,
+                        corpus_weight=corpus_idx.corpus.weight,
+                    )
                     all_results.extend(fused)
                 else:
                     all_results.extend(results)
