@@ -320,7 +320,9 @@ class Converter:
                 # state instead and merge at the next block's first heading.
                 pending_label: tuple[int, str, float, list[str]] | None = None
 
-                def _flush_heading() -> None:
+                def _flush_heading(
+                    _last_marker: list[str | None] = last_marker,
+                ) -> None:
                     """Emit and reset the pending heading accumulator."""
                     nonlocal heading_parts, heading_size, heading_level_size, heading_is_label, pending_label
                     if heading_parts:
@@ -329,7 +331,7 @@ class Converter:
                             heading_level_size if heading_level_size is not None else heading_size,
                             size_to_level,
                             output_lines, emitted_headings,
-                            last_marker,
+                            _last_marker,
                         )
                         # If this was a bare label (not merged with a title),
                         # save it for the next block's first heading.
