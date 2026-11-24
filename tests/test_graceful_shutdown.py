@@ -134,7 +134,17 @@ class TestGracefulShutdown:
         try:
             # Wait for the server to start listening
             if not _wait_for_port("127.0.0.1", port, timeout=20):
-                stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+                # The child is still alive here (it is the slow-startup case),
+                # so read its stderr only after terminating it: stderr is a
+                # pipe and read() would block until the child exits (#81).
+                try:
+                    proc.terminate()
+                    _, stderr_bytes = proc.communicate(timeout=10)
+                    stderr = (stderr_bytes or b"").decode("utf-8", errors="replace")
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    _, stderr_bytes = proc.communicate(timeout=5)
+                    stderr = (stderr_bytes or b"").decode("utf-8", errors="replace")
                 pytest.skip(
                     f"Server did not start on port {port} within 20s "
                     f"(host may be busy). stderr:\n{stderr[:2000]}"
