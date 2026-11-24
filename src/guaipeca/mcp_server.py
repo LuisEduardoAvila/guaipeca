@@ -91,8 +91,8 @@ def _origin_allowed(origin: str, allowed_origins: list[str] | None) -> bool:
     if not origin:
         return True
     if allowed_origins:
-        norm = origin.rstrip("/")
-        return norm in {a.rstrip("/") for a in allowed_origins}
+        norm = origin.strip().rstrip("/")
+        return norm in {a.strip().rstrip("/") for a in allowed_origins}
     try:
         parsed = urllib.parse.urlparse(origin)
         if parsed.scheme not in ("http", "https"):

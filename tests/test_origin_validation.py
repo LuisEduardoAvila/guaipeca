@@ -53,3 +53,13 @@ class TestOriginPolicy:
         assert _origin_allowed("https://other.example.com", allowed) is False
         # An allowlist replaces the loopback default rather than extending it.
         assert _origin_allowed("http://localhost:3000", allowed) is False
+
+    def test_padded_entry_matches_both_layers(self):
+        """A padded entry matches _origin_allowed (outer) and
+        _allowed_origin_patterns (inner SDK) equally — never one accepts
+        while the other rejects. See issue #101."""
+        allowed = ["https://ui.example.com"]
+        # Padded origin matches the trimmed allowlist entry.
+        assert _origin_allowed("  https://ui.example.com  ", allowed) is True
+        # Whitespace-only origin is rejected (both layers strip to empty).
+        assert _origin_allowed("  ", allowed) is False
