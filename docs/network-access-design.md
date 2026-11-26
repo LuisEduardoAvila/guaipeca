@@ -88,10 +88,10 @@ Two shapes, and they are not interchangeable.
 
 ```yaml
 server:
-  host: 100.127.56.18      # this host's tailscale0 address
+  host: 100.x.y.z          # this host's tailscale0 address
   port: 8090
   allowed_origins:
-    - http://hspi.tailnet-name.ts.net:8090
+    - http://host.tailnet-name.ts.net:8090
 ```
 
 `0.0.0.0` would also listen on `end0` (the LAN) and every docker bridge. The bind check cannot distinguish those from the tailnet one because it only sees what was asked for, so binding to the specific address is the control that matters here. It is also the honest statement of intent.
@@ -112,7 +112,7 @@ Inside a bridge-mode container, `server.host: 0.0.0.0` means "the container's ow
 
 ### 3. CORS origins
 
-The UI from [#87](https://github.com/LuisEduardoAvila/guaipeca/issues/87) is the first browser client, so this matters more than it does for CLI/MCP clients. A browser at `http://hspi.tailnet-name.ts.net:8090` sends that Origin, and `server.allowed_origins` must contain it exactly (scheme, host, port). The `#37` rule applies: no wildcards, list each origin explicitly.
+The UI from [#87](https://github.com/LuisEduardoAvila/guaipeca/issues/87) is the first browser client, so this matters more than it does for CLI/MCP clients. A browser at `http://host.tailnet-name.ts.net:8090` sends that Origin, and `server.allowed_origins` must contain it exactly (scheme, host, port). The `#37` rule applies: no wildcards, list each origin explicitly.
 
 ### 4. Tailnet ACLs (deployment, not code)
 
@@ -121,7 +121,7 @@ Encrypted transport says the packets are private. It does not say which devices 
 ```jsonc
 {
   "grants": [
-    { "src": ["autogroup:member"], "dst": ["hspi:8090"], "ip": ["tcp"] }
+    { "src": ["autogroup:member"], "dst": ["host:8090"], "ip": ["tcp"] }
   ]
 }
 ```
@@ -161,4 +161,4 @@ Worth writing down in the deployment doc that the default (before any ACL) is "e
 
 ## Context
 
-Written after confirming that hspi (`100.127.56.18`) and evo (`100.120.69.29`) are already communicating over Tailscale, with six peers in the tailnet. The service is therefore already on an overlay network; this document formalises that as the supported deployment shape rather than inventing a new capability.
+Written after confirming that the host and a second machine on the same network are already communicating over Tailscale. The service is therefore already on an overlay network; this document formalises that as the supported deployment shape rather than inventing a new capability.

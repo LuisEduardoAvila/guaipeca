@@ -8,9 +8,12 @@ build/
 dist/
 
 # Internal docs and notes (not for public)
-docs/
+# docs/ is public: keep it tracked. Sanitize host-specific details
+# (real IPs, hostnames, tailnet names, personal paths) before committing.
+# Individual private pages, if needed, are listed explicitly below.
 notes/
 openspec/
+.openclaw/
 
 # Service file (contains personal paths)
 guaipeca.service
